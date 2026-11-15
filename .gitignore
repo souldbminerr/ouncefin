@@ -20,3 +20,6 @@ debian/switchfin*
 debian/.debhelper
 .wget-hsts
 /jniLibs/
+
+# notes
+notes/notes.md

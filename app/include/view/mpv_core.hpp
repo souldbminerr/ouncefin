@@ -133,7 +133,11 @@ public:
 
     // 硬件解码
     inline static bool HARDWARE_DEC = false;
-#if defined(__SWITCH__) || defined(BOREALIS_USE_GXM) || defined(ANDROID)
+#if defined(__SWITCH2__)
+    // Switch 2 (libounce/OunceVK): no public NVDEC/hwaccel in homebrew yet.
+    // Force software decode. MPV_SW_RENDER is forced ON by CMake for PLATFORM_SWITCH2.
+    inline static std::string PLAYER_HWDEC_METHOD = "no";
+#elif defined(__SWITCH__) || defined(BOREALIS_USE_GXM) || defined(ANDROID)
     inline static std::string PLAYER_HWDEC_METHOD = "auto";
 #elif defined(__PSV__)
     inline static std::string PLAYER_HWDEC_METHOD = "vita-copy";
@@ -181,6 +185,12 @@ private:
     };
     size_t pitch = PIXCEL_SIZE * sw_size[0];
     void *pixels = nullptr;
+    // Incremented each time on_update renders a new frame into `pixels`.
+    // draw() skips the GPU upload when nothing changed (UI runs at display
+    // rate, video at content rate: most draws would re-upload identical
+    // pixels otherwise).
+    uint64_t sw_seq = 0;
+    uint64_t sw_uploaded = 0;
     mpv_render_param mpv_params[5] = {
         {MPV_RENDER_PARAM_SW_SIZE, &sw_size[0]},
         {MPV_RENDER_PARAM_SW_FORMAT, (void *)sw_format},

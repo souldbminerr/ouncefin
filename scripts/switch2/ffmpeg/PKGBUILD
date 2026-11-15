@@ -1,0 +1,68 @@
+# Maintainer: Switchfin Switch 2 port
+# switch2-ffmpeg with viddec hardware decoders (T239 VideoDecoder).
+# Mirrors scripts/switch/ffmpeg/PKGBUILD, retargeted to Switch 2.
+
+pkgname=switch2-ffmpeg
+pkgver=7.1.5
+pkgrel=1
+pkgdesc='ffmpeg port with viddec HW decoders (Nintendo Switch 2 homebrew)'
+arch=('any')
+url='https://ffmpeg.org/'
+license=('GPL')
+options=(!strip staticlibs)
+makedepends=('switch2-pkg-config')
+depends=('switch-zlib' 'switch-bzip2' 'switch-libass' 'switch-libfribidi'
+         'switch-freetype' 'switch-mbedtls' 'switch-libdav1d')
+source=(
+  "https://ffmpeg.org/releases/ffmpeg-${pkgver}.tar.xz"
+  "horizon.patch"
+  "buffer_aligned_alloc.patch"
+  "viddec.h" "viddec.c" "viddec_h264.c" "viddec_vp9.c" "viddec_av1.c" "viddec_vp8.c"
+)
+sha256sums=('de668509caf9e35e3cd16247341fdb309b3c6d96ed4856e1adf5a5e8fc5b'
+            'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+groups=('switch2-portlibs')
+
+prepare() {
+  cd ffmpeg-$pkgver
+  patch -Np1 -i "$srcdir/horizon.patch"
+  patch -Np1 -i "$srcdir/buffer_aligned_alloc.patch"
+  for f in viddec.h viddec.c viddec_h264.c viddec_vp9.c viddec_av1.c viddec_vp8.c; do
+    cp "$srcdir/$f" libavcodec/$f
+  done
+  grep -q viddec_h264 libavcodec/Makefile || cat >> libavcodec/Makefile <<'EOF'
+OBJS-$(CONFIG_H264_VIDDEC_DECODER)       += viddec.o viddec_h264.o
+OBJS-$(CONFIG_VP9_VIDDEC_DECODER)        += viddec.o viddec_vp9.o
+OBJS-$(CONFIG_AV1_VIDDEC_DECODER)        += viddec.o viddec_av1.o
+OBJS-$(CONFIG_VP8_VIDDEC_DECODER)        += viddec.o viddec_vp8.o
+EOF
+  for c in h264 vp9 av1 vp8; do
+    grep -q "${c}_viddec" libavcodec/allcodecs.c || \
+      sed -i "s|extern const FFCodec ff_${c}_decoder;|extern const FFCodec ff_${c}_decoder;\\nextern const FFCodec ff_${c}_viddec_decoder;|" libavcodec/allcodecs.c
+  done
+}
+
+build() {
+  cd ffmpeg-$pkgver
+  source /opt/devkitpro/switch2vars.sh
+  ./configure --prefix="$PORTLIBS_PREFIX" --enable-gpl --disable-shared --enable-static \
+    --cross-prefix=aarch64-none-elf- --enable-cross-compile \
+    --arch=aarch64 --cpu=cortex-a78c --target-os=horizon --enable-pic \
+    --extra-cflags='-D__SWITCH__ -D__SWITCH2__ -D_GNU_SOURCE -O2 -mcpu=cortex-a78c+crypto -mtp=soft -fPIC -ftls-model=local-exec' \
+    --extra-cxxflags='-D__SWITCH__ -D__SWITCH2__ -D_GNU_SOURCE -O2 -mcpu=cortex-a78c+crypto -mtp=soft -fPIC -ftls-model=local-exec' \
+    --extra-ldflags="-fPIE -L${PORTLIBS_PREFIX}/lib -L${DEVKITPRO}/portlibs/switch/lib -L${DEVKITPRO}/libounce/lib -lounce" \
+    --disable-runtime-cpudetect --disable-programs --disable-debug --disable-doc \
+    --enable-asm --enable-neon --disable-autodetect --enable-mbedtls --enable-version3 \
+    --disable-avdevice --disable-encoders --disable-muxers \
+    --enable-swscale --enable-swresample --enable-network \
+    --enable-zlib --enable-bzlib --enable-libass --enable-libdav1d \
+    --disable-filters --enable-filter=hflip,vflip,transpose
+  make -j$(nproc)
+}
+
+package() {
+  cd ffmpeg-$pkgver
+  source /opt/devkitpro/switch2vars.sh
+  make DESTDIR="$pkgdir" install
+  rm -r "$pkgdir"${PORTLIBS_PREFIX}/share
+}

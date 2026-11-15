@@ -90,6 +90,9 @@ void MPVCore::on_update(void *self) {
         if (flags & MPV_RENDER_UPDATE_FRAME) {
             mpv_render_context_render(mpv->mpv_context, mpv->mpv_params);
             mpv_render_context_report_swap(mpv->mpv_context);
+#ifdef MPV_SW_RENDER
+            mpv->sw_seq++;
+#endif
         }
     });
 #else
@@ -145,6 +148,13 @@ void MPVCore::init() {
     mpv_set_option_string(mpv, "reset-on-next-file", "speed,pause");
     mpv_set_option_string(mpv, "subs-fallback", SUBS_FALLBACK ? "yes" : "no");
     mpv_set_option_string(mpv, "vo", MPVCore::VO.c_str());
+#if defined(__SWITCH2__)
+    // Prefer Switch 2 viddec HW decoders (FFmpeg *_viddec, NV12 out),
+    // fall back to native SW decoders. HEVC has no viddec support
+    // (T239 service: H264/VP9/AV1/VP8 only) and uses SW/transcode.
+    mpv_set_option_string(
+        mpv, "vd", "h264_viddec,vp9_viddec,av1_viddec,vp8_viddec,*,*");
+#endif
 #if defined(__PS4__) || defined(__PSV__) || defined(TRIMUI)
     mpv_set_option_string(mpv, "audio-channels", "stereo");
 #else
@@ -170,7 +180,21 @@ void MPVCore::init() {
         mpv_set_option_string(mpv, "cache", "no");
     }
     // Making the loading process faster
-#if defined(__SWITCH__)
+#if defined(__SWITCH2__)
+/* Prevent frame dropn on libounce */
+    mpv_set_option_string(mpv, "vd-lavc-dr", "yes");
+    mpv_set_option_string(mpv, "vd-lavc-threads", "6");
+    mpv_set_option_string(mpv, "sws-scaler", "fast-bilinear");
+    {
+        std::string locale = brls::Application::getPlatform()->getLocale();
+        if (locale == brls::LOCALE_ZH_HANS)
+            mpv_set_option_string(mpv, "sub-font", "nintendo_udsg-r_org_zh-cn_003");
+        else if (locale == brls::LOCALE_ZH_HANT)
+            mpv_set_option_string(mpv, "sub-font", "nintendo_udjxh-db_zh-tw_003");
+        else if (locale == brls::LOCALE_Ko)
+            mpv_set_option_string(mpv, "sub-font", "nintendo_udsg-r_ko_003");
+    }
+#elif defined(__SWITCH__)
     mpv_set_option_string(mpv, "vd-lavc-dr", "yes");
     mpv_set_option_string(mpv, "vd-lavc-threads", "3");
     // This should fix random crash, but I don't know why.
@@ -463,6 +487,7 @@ void MPVCore::setFrameSize(brls::Rect area) {
     auto vg = brls::Application::getNVGContext();
     if (nvg_image) nvgDeleteImage(vg, nvg_image);
     nvg_image = nvgCreateImageRGBA(vg, drawWidth, drawHeight, mpvImageFlags, (const unsigned char *)pixels);
+    sw_uploaded = sw_seq - 1;
 
     sw_size[0] = drawWidth;
     sw_size[1] = drawHeight;
@@ -499,7 +524,11 @@ void MPVCore::draw(brls::Rect area, float alpha) {
     if (!pixels) return;
 
     auto *vg = brls::Application::getNVGContext();
-    nvgUpdateImage(vg, nvg_image, (const unsigned char *)pixels);
+
+    if (sw_uploaded != sw_seq) {
+        nvgUpdateImage(vg, nvg_image, (const unsigned char *)pixels);
+        sw_uploaded = sw_seq;
+    }
 
     // draw black background
     nvgBeginPath(vg);

@@ -1,6 +1,7 @@
 #include <borealis.hpp>
 
 #include "utils/config.hpp"
+#include "utils/display.hpp"
 #include "utils/download.hpp"
 #include "utils/thread.hpp"
 #include "api/analytics.hpp"
@@ -79,6 +80,11 @@ int main(int argc, char* argv[]) {
     brls::Application::getPlatform()->exitToHomeMode(true);
 
     brls::Application::createWindow(fmt::format("{} for {}", AppVersion::getPackageName(), AppVersion::getPlatform()));
+
+#if defined(__SWITCH2__)
+    // S2 ONLY, real panel resolution
+    Switch2Display::init();
+#endif
 
     // Have the application register an action on every activity that will quit when you press BUTTON_START
     brls::Application::setGlobalQuit(false);

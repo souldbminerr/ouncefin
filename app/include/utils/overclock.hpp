@@ -1,6 +1,13 @@
 #pragma once
 
-#ifdef __SWITCH__
+#if defined(__SWITCH2__)
+// Not needed on S2
+class SwitchSys {
+public:
+    static void setClock(bool) {}
+};
+
+#elif defined(__SWITCH__)
 
 #include <switch.h>
 

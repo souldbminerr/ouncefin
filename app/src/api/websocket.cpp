@@ -14,8 +14,10 @@ void sendCloseOnce(CURL* easy, std::mutex& mutex, bool& sent, std::mutex& closeM
     std::lock_guard<std::mutex> closeLock(closeMutex);
     if (easy == nullptr || sent) return;
     sent = true;
+#if LIBCURL_VERSION_NUM >= 0x080000
     size_t sentLen = 0;
     curl_ws_send(easy, "", 0, &sentLen, 0, CURLWS_CLOSE);
+#endif
 }
 }  // namespace
 

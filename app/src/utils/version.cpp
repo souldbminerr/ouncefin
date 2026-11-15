@@ -58,7 +58,9 @@ std::string AppVersion::getPackageName() { return STR(BUILD_PACKAGE_NAME); }
 std::string AppVersion::getCommit() { return STR(BUILD_TAG_SHORT); }
 
 std::string AppVersion::getPlatform() {
-#ifdef __SWITCH__
+#if defined(__SWITCH2__)
+    return "Switch2";
+#elif defined(__SWITCH__)
     return "NX";
 #elif defined(__PSV__)
     return "PSVita";

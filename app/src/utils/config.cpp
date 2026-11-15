@@ -315,6 +315,15 @@ bool AppConfig::init() {
         brls::Application::ORIGINAL_WINDOW_WIDTH = 1920;
         brls::Application::ORIGINAL_WINDOW_HEIGHT = 1080;
     }
+#if defined(__SWITCH2__)
+    // S2 ONLY: layout stays 1080p so handheld renders 1:1 at 1920x1080 and
+    // docked renders at 3840x2160 with windowScale 2.0. Never default to the
+    // 1280x720 Switch 1 layout space on Switch 2.
+    else if (uiScale.empty()) {
+        brls::Application::ORIGINAL_WINDOW_WIDTH = 1920;
+        brls::Application::ORIGINAL_WINDOW_HEIGHT = 1080;
+    }
+#endif
 
     AppConfig::SYNC = this->getItem(SYNC_SETTING, true);
 
@@ -342,12 +351,22 @@ bool AppConfig::init() {
 
     // 初始化是否使用硬件加速
     MPVCore::VO = this->getItem(MPV_VO, MPVCore::VO);
+#if defined(__SWITCH2__)
+    // Switch 2: software decode only (no NVDEC in homebrew yet)
+    MPVCore::HARDWARE_DEC = this->getItem(PLAYER_HWDEC, false);
+    MPVCore::PLAYER_HWDEC_METHOD = "no";
+#else
     MPVCore::HARDWARE_DEC = this->getItem(PLAYER_HWDEC, true);
+#endif
     MPVCore::FORCE_DIRECTPLAY = this->getItem(FORCE_DIRECTPLAY, false);
     MPVCore::VIDEO_CODEC = this->getItem(TRANSCODEC, MPVCore::VIDEO_CODEC);
     MPVCore::AUDIO_CHANNELS = this->getItem(AUDIO_CHANNELS, MPVCore::AUDIO_CHANNELS);
     // 初始化自定义的硬件加速方案
+#if defined(__SWITCH2__)
+    MPVCore::PLAYER_HWDEC_METHOD = "no";
+#else
     MPVCore::PLAYER_HWDEC_METHOD = this->getItem(PLAYER_HWDEC_CUSTOM, MPVCore::PLAYER_HWDEC_METHOD);
+#endif
     // 初始化默认的倍速设定
     MPVCore::VIDEO_SPEED = this->getItem(PLAYER_SPEED, MPVCore::VIDEO_SPEED);
     // 初始化视频比例
@@ -456,7 +475,15 @@ bool AppConfig::init() {
             });
     });
 
-#ifdef __SWITCH__
+#if defined(__SWITCH2__)
+    // Switch 2: no overclock via pcv/clkrst yet (see overclock.hpp stub).
+    {
+        PlFontData font;
+        if (R_SUCCEEDED(plGetSharedFontByType(&font, PlSharedFontType_Standard))) {
+            lunasvg_add_font_face_from_data("", false, false, font.address, font.size, nullptr, nullptr);
+        }
+    }
+#elif defined(__SWITCH__)
     /// Set Overclock
     if (getItem(AppConfig::OVERCLOCK, false)) {
         SwitchSys::setClock(true);

@@ -22,6 +22,62 @@ cmake_dependent_option(USE_LIBUSBHSFS "Use libusbhsfs for ums access" OFF "PLATF
 # mpv related
 # If your system does not support OpenGL(ES), you can use software rendering, but it will affect performance.
 option(MPV_SW_RENDER "Using CPU to draw videos" OFF)
+
+# Nintendo Switch 2 (libounce + drako3d, software video decode)
+# drako3d v0.5.0 (Tegra T239/Ampere, deko3d-compatible Dk*/dk:: API) ships in
+# $DEVKITPRO/libounce (headers + libdrako3d.a/libdrako3dd.a). UI rendering goes
+# through drako3d (Borealis Switch video path); video frames go through
+# MPV_SW_RENDER (FFmpeg SW decode -> RGBA upload to nanovg-dk), so no mpv GPU
+# backend is needed.
+option(PLATFORM_SWITCH2 "build for Switch 2 (libounce + drako3d, software decode)" OFF)
+option(USE_DRAKO3D "Using drako3d instead of deko3d/OpenGL (Switch 2, requires drako3d in libounce)" OFF)
+if (PLATFORM_SWITCH2)
+    message(STATUS "PLATFORM_SWITCH2: libounce + drako3d + software video path")
+    set(PLATFORM_SWITCH ON)
+    set(MPV_SW_RENDER ON CACHE BOOL "Using CPU to draw videos" FORCE)
+    set(BUILTIN_NSP OFF CACHE BOOL "" FORCE)
+    set(USE_LIBUSBHSFS OFF CACHE BOOL "" FORCE)
+    # deko3d targets Switch 1 Maxwell only. With USE_DRAKO3D, reuse the
+    # borealis deko3d path (API-compatible) compiled against drako3d via
+    # cmake/switch2/drako3d-compat; without it, use OunceVK OpenGL.
+    if (USE_DRAKO3D)
+        set(USE_DEKO3D ON CACHE BOOL "" FORCE)
+    else ()
+        set(USE_DEKO3D OFF CACHE BOOL "" FORCE)
+    endif ()
+    list(APPEND APP_PLATFORM_OPTION -D__SWITCH2__)
+    # Official Switch2 toolchain provides switch2 pkg-config wrapper; borealis
+    # toolchain.cmake otherwise pulls Switch 1 Switch.cmake which resets it to
+    # the switch-only wrapper (missing switch2 mpv). Force switch2 wrapper.
+    # Use msys2 (not PowerShell): source $DEVKITPRO/switch2vars.sh first.
+    # Ninja generator is required (Unix Makefiles choke on C:/ paths).
+    if (DEFINED ENV{DEVKITPRO})
+        set(PKG_CONFIG_EXECUTABLE "$ENV{DEVKITPRO}/portlibs/switch2/bin/aarch64-none-elf-pkg-config" CACHE FILEPATH "" FORCE)
+    endif ()
+    if (USE_DRAKO3D)
+        # drako3d API is deko3d-compatible; Borealis includes <deko3d.h/hpp>.
+        # Compat shims live in-repo at cmake/switch2/drako3d-compat/.
+        # Headers/libs come from $DEVKITPRO/libounce (installed by ounce-devkit).
+        if (DEFINED ENV{DEVKITPRO})
+            set(_LOUNCE_DIR "$ENV{DEVKITPRO}/libounce")
+        else ()
+            message(FATAL_ERROR "USE_DRAKO3D requires DEVKITPRO with libounce (source switch2vars.sh in msys2)")
+        endif ()
+        if (EXISTS "${_LOUNCE_DIR}/include/drako3d.hpp")
+            set(DRako3D_INCLUDE_DIR "${_LOUNCE_DIR}/include" CACHE PATH "drako3d headers")
+            # Borealis itself needs these (built in add_subdirectory below).
+            include_directories("${DRako3D_INCLUDE_DIR}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/cmake/switch2/drako3d-compat")
+            list(APPEND APP_PLATFORM_INCLUDE "${DRako3D_INCLUDE_DIR}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/cmake/switch2/drako3d-compat")
+            list(APPEND APP_PLATFORM_OPTION -DBOREALIS_USE_DRAKO3D -DBOREALIS_USE_DEKO3D)
+            message(STATUS "USE_DRAKO3D: ${_LOUNCE_DIR}, compat ${CMAKE_CURRENT_SOURCE_DIR}/cmake/switch2/drako3d-compat")
+        else ()
+            message(FATAL_ERROR "USE_DRAKO3D requested but ${_LOUNCE_DIR}/include/drako3d.hpp not found")
+        endif ()
+    endif ()
+endif ()
+
 if (MPV_SW_RENDER)
     list(APPEND APP_PLATFORM_OPTION -DMPV_SW_RENDER)
 endif ()
@@ -98,6 +154,44 @@ endif ()
 
 # build borealis and other third party libraries
 add_subdirectory(library)
+
+if (PLATFORM_SWITCH2)
+    # With USE_DRAKO3D, borealis builds its deko3d path (nanovg-dk), which
+    # links `deko3d` (Maxwell). Swap it for drako3d (Ampere, API-compatible).
+    # Without USE_DRAKO3D (OunceVK fallback), drop Tegra X1 Nouveau libs.
+    get_target_property(_brls_libs borealis LINK_LIBRARIES)
+    if (USE_DRAKO3D)
+        # deko3d (Maxwell) -> drako3d (Ampere) in both private and
+        # propagated interface libs. Match whole list items only.
+        if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+            set(_drako_lib drako3dd)
+        else ()
+            set(_drako_lib drako3d)
+        endif ()
+        foreach(_prop LINK_LIBRARIES INTERFACE_LINK_LIBRARIES)
+            get_target_property(_libs borealis ${_prop})
+            if (_libs)
+                set(_fixed "")
+                foreach(_l IN LISTS _libs)
+                    if (_l STREQUAL "deko3d")
+                        list(APPEND _fixed "${_drako_lib}")
+                    else ()
+                        list(APPEND _fixed "${_l}")
+                    endif ()
+                endforeach ()
+                set_target_properties(borealis PROPERTIES ${_prop} "${_fixed}")
+            endif ()
+        endforeach ()
+        list(APPEND APP_PLATFORM_LIB drako3d nx m)
+    else ()
+        if (_brls_libs)
+            list(REMOVE_ITEM _brls_libs drm_nouveau)
+            set_target_properties(borealis PROPERTIES LINK_LIBRARIES "${_brls_libs}")
+        endif ()
+        # Ensure OunceVK EGL is linked for the app as well (harmless if already present)
+        list(APPEND APP_PLATFORM_LIB EGL GLESv2)
+    endif ()
+endif ()
 
 if (USE_SYSTEM_CURL)
     find_package(CURL REQUIRED)
@@ -192,6 +286,12 @@ else ()
     endif ()
 endif()
 
+if (PLATFORM_SWITCH2)
+    # switch2 ffmpeg enables mbedtls (TLS); its static libs must come after
+    # curl/ffmpeg on the link line (switch portlibs has them, switch2 does not).
+    list(APPEND APP_PLATFORM_LIB mbedtls mbedx509 mbedcrypto)
+endif ()
+
 if (BUILTIN_NSP)
     find_library(NSP_LIB NAMES nsp REQUIRED)
     list(APPEND APP_PLATFORM_LIB nsp)
@@ -269,15 +369,45 @@ elseif (PLATFORM_SWITCH)
     if (BUILTIN_NSP)
         add_dependencies(${PROJECT_NAME} forwarder.nsp)
     endif ()
-    if (USE_DEKO3D)
+    if (USE_DEKO3D AND NOT PLATFORM_SWITCH2)
         gen_dksh("${PROJECT_RESOURCES}/shaders")
     endif ()
-    add_custom_target(${PROJECT_NAME}.nro DEPENDS ${PROJECT_NAME}
-        COMMAND ${NX_NACPTOOL_EXE} --create "${PROJECT_NAME}" "${PROJECT_AUTHOR}" "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_ALTER}" ${PROJECT_NAME}.nacp
-        COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_RESOURCES} ${CMAKE_BINARY_DIR}/resources
-        COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_BINARY_DIR}/resources/font/keymap*.ttf ${CMAKE_BINARY_DIR}/resources/font/*_fallback.ttf ${CMAKE_BINARY_DIR}/resources/font/switch_font.ttf
-        COMMAND ${NX_ELF2NRO_EXE} ${PROJECT_NAME}.elf ${PROJECT_NAME}.nro --icon=${PROJECT_ICON} --nacp=${PROJECT_NAME}.nacp --romfsdir=${CMAKE_BINARY_DIR}/resources
-    )
+    if (PLATFORM_SWITCH2)
+        message(STATUS "Switch 2 packaging: NRO via libounce (verify with ounce-devkit; target name may change to NRO2/NSP2)")
+        if (USE_DRAKO3D)
+            # Ampere DKSH for nanovg-dk (drako3d) via uam2. Generated at build
+            # time into the romfs staging dir (after the resources copy).
+            find_program(NX_UAM2_EXE NAMES uam2 HINTS "${DEVKITPRO}/tools/bin")
+            if (NOT NX_UAM2_EXE)
+                message(FATAL_ERROR "USE_DRAKO3D needs uam2 (devkitPro tools/bin)")
+            endif ()
+            set(_DKSH_SRC "${BOREALIS_LIBRARY}/lib/extern/nanovg/deko3d/shaders")
+            add_custom_target(${PROJECT_NAME}.nro DEPENDS ${PROJECT_NAME}
+                COMMAND ${NX_NACPTOOL_EXE} --create "${PROJECT_NAME}" "${PROJECT_AUTHOR}" "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_ALTER}" ${PROJECT_NAME}.nacp
+                COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_RESOURCES} ${CMAKE_BINARY_DIR}/resources
+                COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_BINARY_DIR}/resources/font/keymap*.ttf ${CMAKE_BINARY_DIR}/resources/font/*_fallback.ttf ${CMAKE_BINARY_DIR}/resources/font/switch_font.ttf
+                COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/resources/shaders
+                COMMAND ${NX_UAM2_EXE} -s vert -o ${CMAKE_BINARY_DIR}/resources/shaders/fill_vsh.dksh ${_DKSH_SRC}/fill_vsh.glsl
+                COMMAND ${NX_UAM2_EXE} -s frag -o ${CMAKE_BINARY_DIR}/resources/shaders/fill_fsh.dksh ${_DKSH_SRC}/fill_fsh.glsl
+                COMMAND ${NX_UAM2_EXE} -s frag -o ${CMAKE_BINARY_DIR}/resources/shaders/fill_aa_fsh.dksh ${_DKSH_SRC}/fill_aa_fsh.glsl
+                COMMAND ${NX_ELF2NRO_EXE} ${PROJECT_NAME}.elf ${PROJECT_NAME}.nro --icon=${PROJECT_ICON} --nacp=${PROJECT_NAME}.nacp --romfsdir=${CMAKE_BINARY_DIR}/resources
+            )
+        else ()
+            add_custom_target(${PROJECT_NAME}.nro DEPENDS ${PROJECT_NAME}
+                COMMAND ${NX_NACPTOOL_EXE} --create "${PROJECT_NAME}" "${PROJECT_AUTHOR}" "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_ALTER}" ${PROJECT_NAME}.nacp
+                COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_RESOURCES} ${CMAKE_BINARY_DIR}/resources
+                COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_BINARY_DIR}/resources/font/keymap*.ttf ${CMAKE_BINARY_DIR}/resources/font/*_fallback.ttf ${CMAKE_BINARY_DIR}/resources/font/switch_font.ttf
+                COMMAND ${NX_ELF2NRO_EXE} ${PROJECT_NAME}.elf ${PROJECT_NAME}.nro --icon=${PROJECT_ICON} --nacp=${PROJECT_NAME}.nacp --romfsdir=${CMAKE_BINARY_DIR}/resources
+            )
+        endif ()
+    else ()
+        add_custom_target(${PROJECT_NAME}.nro DEPENDS ${PROJECT_NAME}
+            COMMAND ${NX_NACPTOOL_EXE} --create "${PROJECT_NAME}" "${PROJECT_AUTHOR}" "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_ALTER}" ${PROJECT_NAME}.nacp
+            COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_RESOURCES} ${CMAKE_BINARY_DIR}/resources
+            COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_BINARY_DIR}/resources/font/keymap*.ttf ${CMAKE_BINARY_DIR}/resources/font/*_fallback.ttf ${CMAKE_BINARY_DIR}/resources/font/switch_font.ttf
+            COMMAND ${NX_ELF2NRO_EXE} ${PROJECT_NAME}.elf ${PROJECT_NAME}.nro --icon=${PROJECT_ICON} --nacp=${PROJECT_NAME}.nacp --romfsdir=${CMAKE_BINARY_DIR}/resources
+        )
+    endif ()
 elseif (PLATFORM_PSV)
     set(VITA_MKSFOEX_FLAGS "${VITA_MKSFOEX_FLAGS} -d ATTRIBUTE2=12") # max heap size mode
     set(PSV_ASSETS_FILES

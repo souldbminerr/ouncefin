@@ -1,6 +1,8 @@
 #include "utils/overclock.hpp"
 
-#ifdef __SWITCH__
+#if defined(__SWITCH2__)
+// No-op stub (see header). libounce clock control TBD.
+#elif defined(__SWITCH__)
 
 int SwitchSys::stock_cpu_clock = 0;
 int SwitchSys::stock_gpu_clock = 0;

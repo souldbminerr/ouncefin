@@ -44,6 +44,8 @@ public:
         this->labelVersion->setText(fmt::format("v{}-{} ({})", AppVersion::getVersion(), AppVersion::getCommit(),
 #if defined(BOREALIS_USE_D3D11)
             "D3D11"
+#elif defined(BOREALIS_USE_DRAKO3D)
+            "Drako3D"
 #elif defined(BOREALIS_USE_DEKO3D)
             "Deko3D"
 #elif defined(BOREALIS_USE_GXM)
@@ -142,7 +144,7 @@ void SettingTab::onCreate() {
         }
     }
 
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && !defined(__SWITCH2__)
     btnOverClock->init(
         "main/setting/others/overclock"_i18n, conf.getItem(AppConfig::OVERCLOCK, false), [&conf](bool value) {
             SwitchSys::setClock(value);
@@ -152,13 +154,17 @@ void SettingTab::onCreate() {
     btnOverClock->setVisibility(brls::Visibility::GONE);
 #endif
 
-    /// Hardware decode
+    /// Hardware decode (Switch 2: software only, no NVDEC in homebrew yet)
+#if defined(__SWITCH2__)
+    btnHWDEC->setVisibility(brls::Visibility::GONE);
+#else
     btnHWDEC->init("main/setting/playback/hwdec"_i18n, MPVCore::HARDWARE_DEC, [&conf](bool value) {
         if (MPVCore::HARDWARE_DEC == value) return;
         MPVCore::HARDWARE_DEC = value;
         MPVCore::instance().restart();
         conf.setItem(AppConfig::PLAYER_HWDEC, value);
     });
+#endif
 
 #if defined(ANDROID)
     auto& voOption = conf.getOptions(AppConfig::MPV_VO);
