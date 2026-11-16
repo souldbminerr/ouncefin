@@ -7,6 +7,7 @@
 #include "utils/config.hpp"
 #include "utils/misc.hpp"
 #include <fmt/ranges.h>
+#include <cstring>
 
 static inline void check_error(int status) {
     if (status < 0) brls::Logger::error("MPV ERROR => {}", mpv_error_string(status));
@@ -483,6 +484,8 @@ void MPVCore::setFrameSize(brls::Rect area) {
         pixels = malloc(frameSize * PIXCEL_SIZE);
         mpv_params[3].data = pixels;
     }
+    // memset so garbage isn't presented
+    memset(pixels, 0, (size_t)frameSize * PIXCEL_SIZE);
 
     auto vg = brls::Application::getNVGContext();
     if (nvg_image) nvgDeleteImage(vg, nvg_image);
