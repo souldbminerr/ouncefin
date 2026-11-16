@@ -316,12 +316,10 @@ bool AppConfig::init() {
         brls::Application::ORIGINAL_WINDOW_HEIGHT = 1080;
     }
 #if defined(__SWITCH2__)
-    // S2 ONLY: layout stays 1080p so handheld renders 1:1 at 1920x1080 and
-    // docked renders at 3840x2160 with windowScale 2.0. Never default to the
-    // 1280x720 Switch 1 layout space on Switch 2.
+    // S2 looks a lot better at 720p
     else if (uiScale.empty()) {
-        brls::Application::ORIGINAL_WINDOW_WIDTH = 1920;
-        brls::Application::ORIGINAL_WINDOW_HEIGHT = 1080;
+        brls::Application::ORIGINAL_WINDOW_WIDTH = 1280;
+        brls::Application::ORIGINAL_WINDOW_HEIGHT = 720;
     }
 #endif
 

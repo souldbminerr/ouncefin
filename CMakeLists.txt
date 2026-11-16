@@ -46,14 +46,11 @@ if (PLATFORM_SWITCH2)
         set(USE_DEKO3D OFF CACHE BOOL "" FORCE)
     endif ()
     list(APPEND APP_PLATFORM_OPTION -D__SWITCH2__)
-    # Official Switch2 toolchain provides switch2 pkg-config wrapper; borealis
-    # toolchain.cmake otherwise pulls Switch 1 Switch.cmake which resets it to
-    # the switch-only wrapper (missing switch2 mpv). Force switch2 wrapper.
-    # Use msys2 (not PowerShell): source $DEVKITPRO/switch2vars.sh first.
-    # Ninja generator is required (Unix Makefiles choke on C:/ paths).
-    if (DEFINED ENV{DEVKITPRO})
-        set(PKG_CONFIG_EXECUTABLE "$ENV{DEVKITPRO}/portlibs/switch2/bin/aarch64-none-elf-pkg-config" CACHE FILEPATH "" FORCE)
-    endif ()
+    # NOTE: libounce -I flags and the switch2 pkg-config wrapper come from
+    # the borealis PLATFORM_SWITCH2 toolchain branch + libounce Switch2.cmake;
+    # do NOT re-add them here. Use msys2 (not PowerShell): source
+    # $DEVKITPRO/switch2vars.sh first. Ninja generator is required
+    # (Unix Makefiles choke on C:/ paths).
     if (USE_DRAKO3D)
         # drako3d API is deko3d-compatible; Borealis includes <deko3d.h/hpp>.
         # Compat shims live in-repo at cmake/switch2/drako3d-compat/.
@@ -113,7 +110,7 @@ set(VERSION_MAJOR "0")
 set(VERSION_MINOR "9")
 set(VERSION_ALTER "5")
 set(PROJECT_TITLEID "010ff000ffff0003")
-set(PROJECT_AUTHOR "dragonflylee")
+set(PROJECT_AUTHOR "dragonflylee, Souldbminer")
 set(PACKAGE_NAME "fun.dragonfly.switchfin")
 set(VITA_TITLEID "SWITCHFIN")
 set(PSN_TITLE_ID "SFIN00000")
@@ -156,38 +153,11 @@ endif ()
 add_subdirectory(library)
 
 if (PLATFORM_SWITCH2)
-    # With USE_DRAKO3D, borealis builds its deko3d path (nanovg-dk), which
-    # links `deko3d` (Maxwell). Swap it for drako3d (Ampere, API-compatible).
-    # Without USE_DRAKO3D (OunceVK fallback), drop Tegra X1 Nouveau libs.
-    get_target_property(_brls_libs borealis LINK_LIBRARIES)
+    # borealis itself now links drako3d (or OunceVK EGL) via its
+    # PLATFORM_SWITCH2 branch; the app just needs the same libs directly.
     if (USE_DRAKO3D)
-        # deko3d (Maxwell) -> drako3d (Ampere) in both private and
-        # propagated interface libs. Match whole list items only.
-        if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-            set(_drako_lib drako3dd)
-        else ()
-            set(_drako_lib drako3d)
-        endif ()
-        foreach(_prop LINK_LIBRARIES INTERFACE_LINK_LIBRARIES)
-            get_target_property(_libs borealis ${_prop})
-            if (_libs)
-                set(_fixed "")
-                foreach(_l IN LISTS _libs)
-                    if (_l STREQUAL "deko3d")
-                        list(APPEND _fixed "${_drako_lib}")
-                    else ()
-                        list(APPEND _fixed "${_l}")
-                    endif ()
-                endforeach ()
-                set_target_properties(borealis PROPERTIES ${_prop} "${_fixed}")
-            endif ()
-        endforeach ()
         list(APPEND APP_PLATFORM_LIB drako3d nx m)
     else ()
-        if (_brls_libs)
-            list(REMOVE_ITEM _brls_libs drm_nouveau)
-            set_target_properties(borealis PROPERTIES LINK_LIBRARIES "${_brls_libs}")
-        endif ()
         # Ensure OunceVK EGL is linked for the app as well (harmless if already present)
         list(APPEND APP_PLATFORM_LIB EGL GLESv2)
     endif ()

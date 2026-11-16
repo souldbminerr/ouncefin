@@ -1,0 +1,136 @@
+diff --git a/library/CMakeLists.txt b/library/CMakeLists.txt
+index 1d8eca0..baf50f7 100644
+--- a/library/CMakeLists.txt
++++ b/library/CMakeLists.txt
+@@ -254,7 +254,7 @@ elseif(PLATFORM_IOS OR PLATFORM_TVOS)
+     elseif(PLATFORM_TVOS)
+         list(APPEND BRLS_PLATFORM_OPTION -D__SDL2__ -DTVOS)
+     endif()
+-elseif(PLATFORM_SWITCH)
++elseif(PLATFORM_SWITCH OR PLATFORM_SWITCH2)
+     list(APPEND BOREALIS_SOURCE
+             ${BOREALIS_PATH}/lib/extern/switch-libpulsar/src/archive
+             ${BOREALIS_PATH}/lib/extern/switch-libpulsar/src/bfgrp
+@@ -271,16 +271,34 @@ elseif(PLATFORM_SWITCH)
+     find_package(PkgConfig REQUIRED)
+ 
+     if (BOREALIS_USE_DEKO3D)
+-        list(APPEND BRLS_PLATFORM_LIBS deko3d nx m)
++        if (PLATFORM_SWITCH2)
++            # drako3d (Ampere) instead of deko3d (Maxwell); headers come
++            # from libounce, mapped via deko3d-compat shims.
++            if (CMAKE_BUILD_TYPE STREQUAL "Debug")
++                list(APPEND BRLS_PLATFORM_LIBS drako3dd nx m)
++            else ()
++                list(APPEND BRLS_PLATFORM_LIBS drako3d nx m)
++            endif ()
++        else ()
++            list(APPEND BRLS_PLATFORM_LIBS deko3d nx m)
++        endif ()
+     elseif (USE_SDL2)
+         find_package(SDL2 REQUIRED)
+         list(REMOVE_ITEM BOREALIS_SRC ${BOREALIS_PATH}/lib/platforms/switch/switch_video.cpp)
+         list(APPEND BOREALIS_SRC ${BOREALIS_PATH}/lib/platforms/sdl/sdl_video.cpp)
+-        list(APPEND BRLS_PLATFORM_LIBS ${SDL2_LIBRARIES} EGL glapi drm_nouveau nx m)
++        if (PLATFORM_SWITCH2)
++            list(APPEND BRLS_PLATFORM_LIBS ${SDL2_LIBRARIES} EGL glapi nx m)
++        else ()
++            list(APPEND BRLS_PLATFORM_LIBS ${SDL2_LIBRARIES} EGL glapi drm_nouveau nx m)
++        endif ()
+     else ()
+         list(REMOVE_ITEM BOREALIS_SRC ${BOREALIS_PATH}/lib/platforms/switch/switch_video.cpp)
+         list(APPEND BOREALIS_SRC ${BOREALIS_PATH}/lib/platforms/glfw/glfw_video.cpp)
+-        list(APPEND BRLS_PLATFORM_LIBS glfw3 EGL glapi drm_nouveau nx m)
++        if (PLATFORM_SWITCH2)
++            list(APPEND BRLS_PLATFORM_LIBS glfw3 EGL glapi nx m)
++        else ()
++            list(APPEND BRLS_PLATFORM_LIBS glfw3 EGL glapi drm_nouveau nx m)
++        endif ()
+     endif ()
+     set(BRLS_PLATFORM_RESOURCES_PATH "\"romfs:/\"")
+ else ()
+@@ -318,7 +336,7 @@ if (BRLS_FONTSTASH_STREAM)
+     )
+     message(STATUS "borealis fontstash use stream")
+ endif ()
+-if (PLATFORM_SWITCH AND BOREALIS_USE_DEKO3D)
++if ((PLATFORM_SWITCH OR PLATFORM_SWITCH2) AND BOREALIS_USE_DEKO3D)
+     file(GLOB_RECURSE NANOVG_PLATFORM_SRC ${BOREALIS_PATH}/lib/extern/nanovg/*.cpp)
+     list(APPEND BOREALIS_SRC ${NANOVG_PLATFORM_SRC})
+ endif ()
+diff --git a/library/cmake/commonOption.cmake b/library/cmake/commonOption.cmake
+index 092460c..a8cc741 100644
+--- a/library/cmake/commonOption.cmake
++++ b/library/cmake/commonOption.cmake
+@@ -13,6 +13,7 @@ option(PLATFORM_ANDROID "build for Android" OFF)
+ option(PLATFORM_PSV "build for psv" OFF)
+ option(PLATFORM_PS4 "build for ps4" OFF)
+ option(PLATFORM_SWITCH "build for switch" OFF)
++option(PLATFORM_SWITCH2 "build for switch 2 (libounce)" OFF)
+ 
+ # OpenGL options
+ option(USE_EGL "Using EGL instead of native GL." OFF)
+@@ -37,6 +38,8 @@ set(IOS_GUI_IDENTIFIER "" CACHE STRING "Package name.")
+ 
+ # Nintendo Switch Only
+ cmake_dependent_option(USE_DEKO3D "Using deko3d instead of OpenGL." OFF "PLATFORM_SWITCH" OFF)
++# Nintendo Switch 2 Only (drako3d is API-compatible with deko3d)
++cmake_dependent_option(USE_DRAKO3D "Using drako3d instead of OpenGL." OFF "PLATFORM_SWITCH2" OFF)
+ 
+ option(USE_BOOST_FILESYSTEM "Whether to use the boost::filesystem instead of std::filesystem" OFF)
+ 
+@@ -83,7 +86,7 @@ endif ()
+ 
+ if (NOT DEFINED APP_PLATFORM_LINK_OPTION)
+     set(APP_PLATFORM_LINK_OPTION)
+-    if (PLATFORM_SWITCH OR PLATFORM_PSV)
++    if (PLATFORM_SWITCH OR PLATFORM_SWITCH2 OR PLATFORM_PSV)
+         list(APPEND APP_PLATFORM_LINK_OPTION "-Wl,-Map,borealis.map")
+     endif ()
+ endif ()
+\ No newline at end of file
+diff --git a/library/cmake/toolchain.cmake b/library/cmake/toolchain.cmake
+index 3cb069b..a45d638 100644
+--- a/library/cmake/toolchain.cmake
++++ b/library/cmake/toolchain.cmake
+@@ -76,6 +76,21 @@ elseif(PLATFORM_PS4)
+     set(OPENORBIS $ENV{OPENORBIS} CACHE BOOL "OPENORBIS")
+     set(CMAKE_TOOLCHAIN_FILE "${OPENORBIS}/cmake/ps4.cmake" CACHE PATH "toolchain file")
+     add_definitions(-DPS4 -D__PS4__)
++elseif (PLATFORM_SWITCH2)
++    message(STATUS "building for SWITCH2")
++    if (NOT DEFINED ENV{DEVKITPRO})
++        message(FATAL_ERROR "Please set DEVKITPRO in your environment. export DEVKITPRO=<path to>/devkitpro")
++    endif ()
++    set(DEVKITPRO $ENV{DEVKITPRO} CACHE BOOL "DEVKITPRO")
++    set(CMAKE_C_FLAGS "-D__SWITCH__ -D__SWITCH2__ -I${DEVKITPRO}/libounce/include -I${DEVKITPRO}/portlibs/switch2/include -I${DEVKITPRO}/portlibs/switch/include")
++    set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS}")
++    # NOTE: do NOT include devkitPro's Switch.cmake here. The Switch 2
++    # toolchain file (libounce Switch2.cmake) is already active via
++    # aarch64-none-elf-cmake; Switch.cmake would reset NX_ROOT and
++    # PKG_CONFIG_EXECUTABLE to Switch 1 (libnx) locations.
++    if (NOT USE_GLFW AND NOT SDL2)
++        set(USE_GLFW ON)
++    endif ()
+ elseif (PLATFORM_SWITCH)
+     message(STATUS "building for SWITCH")
+     if (NOT DEFINED ENV{DEVKITPRO})
+@@ -89,11 +104,16 @@ elseif (PLATFORM_SWITCH)
+         set(USE_GLFW ON)
+     endif ()
+ else()
+-    message(FATAL_ERROR "Please set build target. Example: -DPLATFORM_DESKTOP=ON or -DPLATFORM_SWITCH=ON")
++    message(FATAL_ERROR "Please set build target. Example: -DPLATFORM_DESKTOP=ON, -DPLATFORM_SWITCH=ON or -DPLATFORM_SWITCH2=ON")
+ endif ()
+ 
+ # graphics drivers
+-if (USE_DEKO3D)
++if (USE_DRAKO3D)
++    message(STATUS "USE_DRAKO3D")
++    # drako3d is API-compatible with deko3d; reuse the deko3d code path
++    # (nanovg-dk) compiled against drako3d headers via deko3d-compat shims.
++    set(BOREALIS_USE_DEKO3D ON)
++elseif (USE_DEKO3D)
+     message(STATUS "USE_DEKO3D")
+     set(BOREALIS_USE_DEKO3D ON)
+ elseif (USE_D3D11)

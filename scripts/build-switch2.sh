@@ -13,11 +13,12 @@ if [ -f "$DEVKITPRO/switch2vars.sh" ]; then
 else
   echo "warning: \$DEVKITPRO/switch2vars.sh not found; continuing with current env" >&2
 fi
-# USE_DRAKO3D is a placeholder (maps to OunceVK OpenGL). Pass -DUSE_DRAKO3D=ON
-# only to test the forward-compat define; it does not enable a real driver.
+# USE_DRAKO3D selects the drako3d GPU path (borealis deko3d code compiled
+# against drako3d via cmake/switch2/drako3d-compat). Omit it for the
+# OunceVK OpenGL fallback.
 aarch64-none-elf-cmake -S . -B build_switch2 \
   -DPLATFORM_SWITCH2=ON \
-  -DUSE_SDL2=ON -DUSE_GLES3=ON \
-  -DCMAKE_BUILD_TYPE=Release "$@"
+  -DUSE_DRAKO3D=ON \
+  -DCMAKE_BUILD_TYPE=Release -G Ninja "$@"
 cmake --build build_switch2 -j"$(nproc 2>/dev/null || echo 4)"
 echo "done: build_switch2/Switchfin.elf (+ Switchfin.nro if packaging succeeded)"

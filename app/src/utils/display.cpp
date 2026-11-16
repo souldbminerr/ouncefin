@@ -12,6 +12,7 @@ constexpr int DOCKED_W = 3840, DOCKED_H = 2160;
 
 AppletHookCookie s_hookCookie;
 bool s_hookInstalled = false;
+int s_lastFpsMode = -1;
 
 void s_onAppletHook(AppletHookType hook, void* /*arg*/) {
     if (hook == AppletHookType_OnOperationMode) {
@@ -22,11 +23,23 @@ void s_onAppletHook(AppletHookType hook, void* /*arg*/) {
 }  // namespace
 
 void Switch2Display::update() {
+    const bool docked = (appletGetOperationMode() == AppletOperationMode_Console);
+    const int fpsMode = docked ? 1 : 0;
+    if (fpsMode != s_lastFpsMode) {
+        Result rc = docked ? nwindowSetFrameRates(nwindowGetDefault(), 0, 0, false)
+                           : nwindowSetFrameRates(nwindowGetDefault(), 120, 60, false);
+        if (R_SUCCEEDED(rc)) {
+            s_lastFpsMode = fpsMode;
+        } else {
+            brls::Logger::warning("Switch2 display: nwindowSetFrameRates failed: 0x%x", (unsigned)rc);
+        }
+    }
+
     int32_t w = 0, h = 0;
     if (R_SUCCEEDED(appletGetDefaultDisplayResolution(&w, &h)) && w > 0 &&
         h > 0) {
         // Real display resolution: 1080p handheld, 4K docked.
-    } else if (appletGetOperationMode() == AppletOperationMode_Console) {
+    } else if (docked) {
         w = DOCKED_W;
         h = DOCKED_H;
     } else {
