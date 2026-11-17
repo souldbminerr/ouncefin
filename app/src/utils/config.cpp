@@ -350,8 +350,9 @@ bool AppConfig::init() {
     // 初始化是否使用硬件加速
     MPVCore::VO = this->getItem(MPV_VO, MPVCore::VO);
 #if defined(__SWITCH2__)
-    // Switch 2: software decode only (no NVDEC in homebrew yet)
-    MPVCore::HARDWARE_DEC = this->getItem(PLAYER_HWDEC, false);
+    // Switch 2 HW decode is on: T239 viddec decoders via the vd list in
+    // mpv_core (system-memory output, so the mpv hwdec API stays "no").
+    MPVCore::HARDWARE_DEC = this->getItem(PLAYER_HWDEC, true);
     MPVCore::PLAYER_HWDEC_METHOD = "no";
 #else
     MPVCore::HARDWARE_DEC = this->getItem(PLAYER_HWDEC, true);

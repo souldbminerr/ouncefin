@@ -150,11 +150,18 @@ void MPVCore::init() {
     mpv_set_option_string(mpv, "subs-fallback", SUBS_FALLBACK ? "yes" : "no");
     mpv_set_option_string(mpv, "vo", MPVCore::VO.c_str());
 #if defined(__SWITCH2__)
-    // Prefer Switch 2 viddec HW decoders (FFmpeg *_viddec, NV12 out),
-    // fall back to native SW decoders. HEVC has no viddec support
-    // (T239 service: H264/VP9/AV1/VP8 only) and uses SW/transcode.
-    mpv_set_option_string(
-        mpv, "vd", "h264_viddec,vp9_viddec,av1_viddec,vp8_viddec,*,*");
+    // Switch 2 HW decode = FFmpeg *_viddec decoders (T239 viddec service,
+    // system-memory NV12 out, so the mpv hwdec API stays off below).
+    // HEVC has no viddec support (H264/VP9/AV1/VP8 only) and uses SW/transcode.
+    if (mpv_set_option_string(
+            mpv, "vd", "h264_viddec,vp9_viddec,av1_viddec,vp8_viddec,*,*")
+        < 0) {
+        brls::Logger::error("MPV vd (viddec HW decoders) rejected; check Switch 2 FFmpeg build");
+    }
+    // No video rotation on Switch 2: the SW upload path assumes native frame
+    // dimensions, and rotating swaps them (crash). Portrait videos play
+    // unrotated rather than crashing.
+    mpv_set_option_string(mpv, "video-rotate", "no");
 #endif
 #if defined(__PS4__) || defined(__PSV__) || defined(TRIMUI)
     mpv_set_option_string(mpv, "audio-channels", "stereo");
@@ -220,12 +227,15 @@ void MPVCore::init() {
     mpv_set_option_string(mpv, "opengl-es", "yes");
 #endif
 
-    // hardware decoding
-    if (MPVCore::HARDWARE_DEC) {
-        mpv_set_option_string(mpv, "hwdec", PLAYER_HWDEC_METHOD.c_str());
-        brls::Logger::info("MPV hardware decode: {}", PLAYER_HWDEC_METHOD);
+    /* Video rotation is useless and crashes the S2 decoder, so don't use it */
+    if (MPVCore::HARDWARE_DEC && PLAYER_HWDEC_METHOD != "no") {
+        if (mpv_set_option_string(mpv, "hwdec", PLAYER_HWDEC_METHOD.c_str()) < 0)
+            brls::Logger::error("MPV hwdec '{}' rejected", PLAYER_HWDEC_METHOD);
+        else
+            brls::Logger::info("MPV hardware decode: {}", PLAYER_HWDEC_METHOD);
     } else {
-        mpv_set_option_string(mpv, "hwdec", "no");
+        if (mpv_set_option_string(mpv, "hwdec", "no") < 0)
+            brls::Logger::error("MPV hwdec=no rejected");
     }
 
     if (MPVCore::DEBUG) {

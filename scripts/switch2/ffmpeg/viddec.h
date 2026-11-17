@@ -70,6 +70,12 @@ void viddec_close(ViddecBackend *b);
 
 int viddec_drained(ViddecBackend *b);
 
+/* Exported (C linkage) for frontend identification of the active HW
+ * decoder engine: returns the ViddecCodec value in use, or -1 when no
+ * viddec decoder is active. */
+int viddec_active_codec(void);
+unsigned long long viddec_frames_out(void);
+
 int viddec_h264_config_from_avcc(const uint8_t *extradata, size_t extradata_size,
                                  uint8_t **out, size_t *out_size);
 int viddec_h264_config_from_annexb(const uint8_t *data, size_t size,

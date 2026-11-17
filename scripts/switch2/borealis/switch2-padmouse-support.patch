@@ -1,0 +1,627 @@
+diff --git a/library/include/borealis/core/input.hpp b/library/include/borealis/core/input.hpp
+index 1458024..89c3803 100644
+--- a/library/include/borealis/core/input.hpp
++++ b/library/include/borealis/core/input.hpp
+@@ -345,6 +345,14 @@ class InputManager
+ 
+     virtual void setPointerLock(bool lock) {};
+ 
++    /**
++     * Whether the given controller button is currently bound to mouse mode
++     * (e.g. Switch 2 Joy-Con mouse buttons). Consuming such a button must
++     * neither exit mouse mode nor flip the global input type to gamepad.
++     * Defaults to false; platforms with a mouse mode override it.
++     */
++    virtual bool isMouseModeBinding(ControllerButton button) { (void)button; return false; };
++
+     inline Event<Point>* getMouseCusorOffsetChanged()
+     {
+         return &mouseCusorOffsetChanged;
+diff --git a/library/include/borealis/core/touch/tap_gesture.hpp b/library/include/borealis/core/touch/tap_gesture.hpp
+index c6ee8e0..8265ac8 100644
+--- a/library/include/borealis/core/touch/tap_gesture.hpp
++++ b/library/include/borealis/core/touch/tap_gesture.hpp
+@@ -42,6 +42,7 @@ struct TapGestureStatus
+ {
+     GestureState state; // Gesture state
+     Point position; // Current position
++    ControllerButton button = BUTTON_A; // Button this tap activates (left = A, right = X)
+ };
+ typedef Event<TapGestureStatus, Sound*> TapGestureEvent;
+ 
+@@ -80,6 +81,7 @@ class TapGestureRecognizer : public GestureRecognizer
+     TapGestureEvent tapEvent;
+     Point position{};
+     GestureState lastState{};
++    ControllerButton tapButton = BUTTON_A;
+     bool forceRecognision{};
+ };
+ 
+diff --git a/library/include/borealis/platforms/switch/switch_input.hpp b/library/include/borealis/platforms/switch/switch_input.hpp
+index 82c10e6..03b55ba 100644
+--- a/library/include/borealis/platforms/switch/switch_input.hpp
++++ b/library/include/borealis/platforms/switch/switch_input.hpp
+@@ -54,6 +54,9 @@ class SwitchInputManager : public InputManager
+ 
+     void drawCursor(NVGcontext* vg) override;
+ 
++    bool isMouseModeBinding(ControllerButton button) override;
++    void setMouseModeExitExempt(ControllerButton button, bool exempt);
++
+     void sendRumbleRaw(float lowFreq, float highFreq, float lowAmp, float highAmp);
+ 
+     void clearVibration(int controller);
+@@ -73,6 +76,63 @@ class SwitchInputManager : public InputManager
+     u32 padsStyleSet[GAMEPADS_MAX];
+     bool pointerLocked = false;
+     HidMouseState currentMouseState;
++#ifdef __SWITCH2__
++    // Native Switch 2 Joy-Con mouse (raw HidNmouse API: merged Joy-Con
++    // pointer, same pattern as moonlight-nx2's proven platform.c). The
++    // pointer area is fixed at 1920x1080; positions are mapped to layout
++    // points when reported, so the cursor stays correct in every UI scale,
++    // handheld and docked.
++    static constexpr int PAD_MOUSE_AREA_W      = 1920;
++    static constexpr int PAD_MOUSE_AREA_H      = 1080;
++    // Movement below this (pointer-area px) does not count as mouse use, so
++    // sensor jitter at rest never wakes the cursor.
++    static constexpr int PAD_MOUSE_MOVE_THRESHOLD = 64;
++    // Mouse mode ends (cursor hides, controller takes over) after this long
++    // without mouse use.
++    static constexpr Time PAD_MOUSE_IDLE_HIDE_USEC = 3000000; // 3 s
++    // Mouse cursor: semi-transparent white dot, 50% normally and 75%
++    // while the left button is held.
++    static constexpr float PAD_MOUSE_DOT_RADIUS = 9.0f;
++    static constexpr uint8_t PAD_MOUSE_DOT_ALPHA = 128; // 50% opacity
++    static constexpr uint8_t PAD_MOUSE_DOT_ALPHA_CLICK = 191; // 75% opacity
++    // Pad buttons used as mouse clicks (L/R = left, ZL/ZR = right).
++    static constexpr uint64_t PAD_MOUSE_CLICK_MASK =
++        (uint64_t)HidNpadButton_L | (uint64_t)HidNpadButton_R | (uint64_t)HidNpadButton_ZL | (uint64_t)HidNpadButton_ZR;
++    // Net movement that engages mouse mode even if the sensor tracking bit
++    // is unavailable.
++    static constexpr int PAD_MOUSE_TRACKLESS_JUMP = 256;
++    bool padMouseReady      = false; // hidInitializeNmouse + configs ok
++    bool padMouseFound      = false; // merged handle currently valid
++    bool padMouseLogged     = false; // first-sight log already emitted
++    HidNmouseHandle padMouseHandle{};
++    uint64_t padMouseSeen   = 0; // newest sampling_number consumed
++    int padMouseX = 0, padMouseY = 0; // last position (pointer-area px)
++    int padMouseDeltaX = 0, padMouseDeltaY = 0; // movement this frame
++    int padMouseWheel         = 0; // wheel movement this frame
++    uint32_t padMouseButtons  = 0; // last HidMouseButton bits (informational)
++    uint32_t padMouseFlags    = 0; // last Nmouse flags (bit 1 = tracking)
++    bool padMouseMode      = false;
++    bool padMouseFromPad   = false;
++    bool padMouseHasAnchor = false;
++    int padMouseAnchorX = 0, padMouseAnchorY = 0;
++    Time padMouseLastActive = 0;
++    // Buttons that must not end mouse mode when pressed (mouse-mode
++    // bindings owned by the app, e.g. video seek keys). Only consulted
++    // while padMouseMode is active.
++    bool padMouseExitExempt[_BUTTON_MAX] = {};
++    // Live pad button mask (clicks come straight from the pads: ZL = left,
++    // ZR = right).
++    uint64_t padMousePadButtons = 0;
++    // Buttons held when mouse mode engaged; ignored until released so a
++    // resting finger never fires a phantom click.
++    uint64_t padMouseAdoptButtons = 0;
++    // Reported click state this frame (drives gestures and dot opacity).
++    bool padMouseLeftDown  = false;
++    bool padMouseRightDown = false;
++    // Buttons reported last frame (either held drives the pressed dot).
++    bool padMouseLeftHeld  = false;
++    bool padMouseRightHeld = false;
++#endif
+     HidSixAxisSensorHandle m_six_axis_sensor_handle[4]; // All for player 1, player 2 not supported
+ 
+     std::vector<bool> m_hid_keyboard_state;
+@@ -81,6 +141,10 @@ class SwitchInputManager : public InputManager
+ 
+     void initCursor(NVGcontext* vg);
+     void handleMouse();
++#ifdef __SWITCH2__
++    void handlePadPointer();
++    uint64_t pollPadButtons();
++#endif
+     void handleKeyboard();
+     void handleControllerSensors();
+     void upToDateMouseState();
+diff --git a/library/lib/core/application.cpp b/library/lib/core/application.cpp
+index c7d67dc..4da6fea 100644
+--- a/library/lib/core/application.cpp
++++ b/library/lib/core/application.cpp
+@@ -345,6 +345,19 @@ void Application::processInput()
+     }
+     currentTouchState = touchState;
+ 
++    // The cached mouse view can belong to a popped activity or tab (dialogs,
++    // dropdowns, navigation). Revalidate it against the current content
++    // tree before use, or every click after a navigation would dispatch to
++    // a detached view instead of what is actually under the cursor.
++    if (currentMouseState.view)
++    {
++        View* root = currentMouseState.view;
++        while (root && root->getParent()) root = root->getParent();
++        View* content = activitiesStack.empty() ? nullptr : activitiesStack.back()->getContentView();
++        if (root != content)
++            currentMouseState.view = nullptr;
++    }
++
+     MouseState mouseState = InputManager::computeMouseState(rawMouse, currentMouseState);
+ 
+     if (mouseState.offset.x != 0 || mouseState.offset.y != 0 || mouseState.scroll.x != 0 || mouseState.scroll.y != 0 || mouseState.leftButton != TouchPhase::NONE || mouseState.middleButton != TouchPhase::NONE || mouseState.rightButton != TouchPhase::NONE)
+@@ -696,8 +709,11 @@ double Application::getDeactivatedFrameTime()
+ 
+ bool Application::handleAction(const ActionType type, const int button, const bool repeating)
+ {
+-    // Dismiss if input type was changed
+-    if (type == ACTION_GAMEPAD && button == BUTTON_A && setInputType(InputType::GAMEPAD))
++    // Dismiss if input type was changed. Buttons currently bound to mouse
++    // mode are not gamepad input: they run their actions as-is.
++    if (type == ACTION_GAMEPAD && button == BUTTON_A
++        && !Application::platform->getInputManager()->isMouseModeBinding((ControllerButton)button)
++        && setInputType(InputType::GAMEPAD))
+         return false;
+ 
+     if (Application::activitiesStack.empty())
+@@ -726,7 +742,10 @@ bool Application::handleAction(const ActionType type, const int button, const bo
+             {
+                 if (action->getActionListener()(hintParent))
+                 {
+-                    setInputType(InputType::GAMEPAD);
++                    // Consuming a mouse-mode binding must not flip the input
++                    // type to gamepad (that would hide the mouse cursor).
++                    if (!Application::platform->getInputManager()->isMouseModeBinding((ControllerButton)button))
++                        setInputType(InputType::GAMEPAD);
+                     if (type == ACTION_GAMEPAD && button == BUTTON_A)
+                         hintParent->playClickAnimation();
+ 
+diff --git a/library/lib/core/touch/tap_gesture.cpp b/library/lib/core/touch/tap_gesture.cpp
+index 3158013..ce029d0 100644
+--- a/library/lib/core/touch/tap_gesture.cpp
++++ b/library/lib/core/touch/tap_gesture.cpp
+@@ -27,7 +27,7 @@ TapGestureRecognizer::TapGestureRecognizer(View* view, TapGestureConfig config)
+             Application::giveFocus(view);
+         for (auto& action : view->getActions())
+         {
+-            if (action->getType() != ACTION_GAMEPAD || action->getButton() != BUTTON_A)
++            if (action->getType() != ACTION_GAMEPAD || action->getButton() != status.button)
+                 continue;
+ 
+             if (action->isAvailable())
+@@ -94,8 +94,27 @@ GestureState TapGestureRecognizer::recognitionLoop(TouchState touch, MouseState
+ 
+     if (phase == TouchPhase::NONE)
+     {
++        // Right mouse button is the secondary tap (same as the X button).
+         position = mouse.position;
+-        phase    = mouse.leftButton;
++        if (mouse.leftButton != TouchPhase::NONE)
++        {
++            phase           = mouse.leftButton;
++            this->tapButton = BUTTON_A;
++        }
++        else if (mouse.rightButton != TouchPhase::NONE)
++        {
++            phase           = mouse.rightButton;
++            this->tapButton = BUTTON_X;
++        }
++        else
++        {
++            phase = TouchPhase::NONE;
++        }
++    }
++    else
++    {
++        // Touch taps always activate the primary (A) button.
++        this->tapButton = BUTTON_A;
+     }
+ 
+     if (!enabled || phase == TouchPhase::NONE)
+@@ -149,6 +168,7 @@ TapGestureStatus TapGestureRecognizer::getCurrentStatus()
+     return TapGestureStatus {
+         .state    = this->state,
+         .position = this->position,
++        .button   = this->tapButton,
+     };
+ }
+ 
+diff --git a/library/lib/platforms/switch/switch_input.cpp b/library/lib/platforms/switch/switch_input.cpp
+index b6ac3a8..a878949 100644
+--- a/library/lib/platforms/switch/switch_input.cpp
++++ b/library/lib/platforms/switch/switch_input.cpp
+@@ -118,6 +118,38 @@ SwitchInputManager::SwitchInputManager()
+     hidInitializeKeyboard();
+     hidInitializeKeyboardMap();
+ 
++#ifdef __SWITCH2__
++    if (R_SUCCEEDED(hidInitializeNmouse(nullptr, 0, PAD_MOUSE_AREA_W, PAD_MOUSE_AREA_H, HidNmousePointerType_Default)))
++    {
++        // Follow the Joy-Con pointers with the merged handle. Shoulder
++        // buttons (L/R) are left click, triggers (ZL/ZR) are right click
++        // (groups 1/2 read back as Left/Right); the stock config maps both
++        // to left, which leaves right click unreachable.
++        HidNmouseButtonConfigJoyRightJcms rightConfig{};
++        rightConfig.selectors[0] = 1; // R -> group 1 (Left)
++        rightConfig.selectors[1] = 2; // ZR -> group 2 (Right)
++        HidNmouseButtonConfigJoyLeftJcms leftConfig{};
++        leftConfig.selectors[0] = 1; // L -> group 1 (Left)
++        leftConfig.selectors[1] = 2; // ZL -> group 2 (Right)
++        if (R_SUCCEEDED(hidSetMergedNmouseSourceTypes(HidNmouseType_JoyLeft | HidNmouseType_JoyRight))
++            && R_SUCCEEDED(hidSetNmouseButtonConfigJoyRightJcms(&rightConfig))
++            && R_SUCCEEDED(hidSetNmouseButtonConfigJoyLeftJcms(&leftConfig)))
++        {
++            this->padMouseReady = true;
++            Logger::info("PadMouse: Joy-Con mouse initialized");
++        }
++        else
++        {
++            Logger::warning("PadMouse: button config failed, Joy-Con mouse disabled");
++            hidFinalizeNmouse();
++        }
++    }
++    else
++    {
++        Logger::warning("PadMouse: hidInitializeNmouse failed, Joy-Con mouse disabled");
++    }
++#endif
++
+     m_hid_keyboard_state.assign(256, false);
+ 
+     // It's necessary to initialize these separately as they all have different handle values
+@@ -142,6 +174,11 @@ SwitchInputManager::~SwitchInputManager()
+     hidStopSixAxisSensor(this->m_six_axis_sensor_handle[2]);
+     hidStopSixAxisSensor(this->m_six_axis_sensor_handle[3]);
+ 
++#ifdef __SWITCH2__
++    if (this->padMouseReady)
++        hidFinalizeNmouse();
++#endif
++
+ }
+ 
+ void SwitchInputManager::clearVibration(int controller)
+@@ -193,6 +230,24 @@ void SwitchInputManager::updateUnifiedControllerState(ControllerState* state)
+         state->buttons[BUTTON_A] |= getKeyboardKeyState(BRLS_KBD_KEY_ENTER);
+         state->buttons[BUTTON_B] |= getKeyboardKeyState(BRLS_KBD_KEY_ESCAPE);
+     }
++
++#ifdef __SWITCH2__
++    // Any controller button press hands control back from the mouse, except
++    // buttons the app bound to mouse mode (they are mouse input, not
++    // controller input). ZL/ZR are already masked in mouse mode, so they
++    // never exit it by themselves.
++    if (this->padMouseMode)
++    {
++        for (size_t j = 0; j < _BUTTON_MAX; j++)
++        {
++            if (state->buttons[j] && !this->padMouseExitExempt[j])
++            {
++                this->padMouseMode = false;
++                break;
++            }
++        }
++    }
++#endif
+ }
+ 
+ short SwitchInputManager::getControllersConnectedCount()
+@@ -235,6 +290,12 @@ void SwitchInputManager::updateControllerStateInner(ControllerState* state, PadS
+     padUpdate(pad);
+     uint64_t keysDown = padGetButtons(pad);
+ 
++#ifdef __SWITCH2__
++    // In mouse mode L/R/ZL/ZR belong to the pointer (click), not to the pad.
++    if (this->padMouseMode)
++        keysDown &= ~PAD_MOUSE_CLICK_MASK;
++#endif
++
+     bool full = pad->style_set & HidNpadStyleSet_NpadFullCtrl;
+ 
+     for (size_t i = 0; i < _BUTTON_MAX; i++)
+@@ -263,6 +324,38 @@ void SwitchInputManager::updateControllerStateInner(ControllerState* state, PadS
+ 
+     state->axes[LEFT_Z]  = 0; // SWITCH NOT SUPPORT ZL AXIS
+     state->axes[RIGHT_Z] = 0; // SWITCH NOT SUPPORT ZR AXIS
++
++#ifdef __SWITCH2__
++    // Derive dpad-equivalent NAV buttons from the analog deflection
++    // directly: the digital stick-direction bits this normally comes from
++    // are not guaranteed on Switch 2, which would leave the sticks dead
++    // while the dpad works. ORed in, so any service-provided bits keep
++    // working unchanged. Mirrors the FULL/HALF mappings above
++    // (half mode is rotated for the sideways single-Joy-Con grip).
++    // Sticks always navigate, in mouse mode too (same as the dpad): using
++    // one is controller input, so it exits mouse mode through the rule
++    // below instead of fighting the cursor.
++    {
++        const float th = 0.5f * (float)0x7FFF;
++        const float lx = (float)analog_stick_l.x, ly = (float)analog_stick_l.y;
++        const float rx = (float)analog_stick_r.x, ry = (float)analog_stick_r.y;
++        if (full)
++        {
++            state->buttons[BUTTON_NAV_UP]    |= (ly < -th) || (ry < -th);
++            state->buttons[BUTTON_NAV_RIGHT] |= (lx > th) || (rx > th);
++            state->buttons[BUTTON_NAV_DOWN]  |= (ly > th) || (ry > th);
++            state->buttons[BUTTON_NAV_LEFT]  |= (lx < -th) || (rx < -th);
++        }
++        else
++        {
++            state->buttons[BUTTON_NAV_UP]    |= (lx > th) || (rx < -th);
++            state->buttons[BUTTON_NAV_RIGHT] |= (ly > th) || (ry < -th);
++            state->buttons[BUTTON_NAV_DOWN]  |= (lx < -th) || (rx > th);
++            state->buttons[BUTTON_NAV_LEFT]  |= (ly < -th) || (ry > th);
++        }
++    }
++
++#endif
+ }
+ 
+ bool SwitchInputManager::getKeyboardKeyState(BrlsKeyboardScancode key)
+@@ -286,6 +379,13 @@ void SwitchInputManager::updateTouchStates(std::vector<RawTouchState>* states)
+             state.position.y = hidState.touches[i].y / Application::windowScale;
+             states->push_back(state);
+         }
++#ifdef __SWITCH2__
++        // Touch is direct manipulation, not mouse use: a touchscreen tap
++        // hands control back to the controller so a hidden mouse mode can
++        // never trap gamepad input (sticks, shoulders) with no cursor.
++        if (!states->empty())
++            this->padMouseMode = false;
++#endif
+     }
+ }
+ 
+@@ -351,6 +451,31 @@ void SwitchInputManager::sendRumble(unsigned short controller, unsigned short lo
+ 
+ void SwitchInputManager::updateMouseStates(RawMouseState* state)
+ {
++#ifdef __SWITCH2__
++    const bool padActive  = this->padMouseReady && this->padMouseFound;
++    this->padMouseFromPad = padActive;
++    if (padActive)
++    {
++        // Native Joy-Con mouse: map the fixed pointer area to layout points so
++        // the cursor, hit-testing and gestures stay correct in every UI scale,
++        // handheld as well as docked.
++        const float scaleX = (float)Application::ORIGINAL_WINDOW_WIDTH / (float)PAD_MOUSE_AREA_W;
++        const float scaleY = (float)Application::ORIGINAL_WINDOW_HEIGHT / (float)PAD_MOUSE_AREA_H;
++        // Clicks come straight from the pads (L/R = left, ZL/ZR = right);
++        // the service button mapping is not consumed so a press can never
++        // report both buttons at once.
++        state->position     = Point(this->padMouseX * scaleX, this->padMouseY * scaleY);
++        state->offset       = Point(this->padMouseDeltaX * scaleX, this->padMouseDeltaY * scaleY);
++        state->scroll       = Point(0, (float)this->padMouseWheel);
++        state->leftButton   = this->padMouseLeftDown;
++        state->middleButton = (this->padMouseButtons & HidMouseButton_Middle) != 0;
++        state->rightButton  = this->padMouseRightDown;
++        lastCursorPosition      = state->position;
++        this->padMouseLeftHeld  = state->leftButton;
++        this->padMouseRightHeld = state->rightButton;
++    }
++    else
++#endif
+     if (currentMouseState.attributes & HidMouseAttribute_IsConnected)
+     {
+         state->position     = Point(currentMouseState.x, currentMouseState.y);
+@@ -367,10 +492,169 @@ void SwitchInputManager::runloopStart()
+ {
+     upToDateMouseState();
+     handleMouse();
++#ifdef __SWITCH2__
++    handlePadPointer();
++#endif
+     handleKeyboard();
+     handleControllerSensors();
+ }
+ 
++#ifdef __SWITCH2__
++uint64_t SwitchInputManager::pollPadButtons()
++{
++    uint64_t padButtons = 0;
++    padUpdate(&this->padStateHandheld);
++    padButtons |= padGetButtons(&this->padStateHandheld);
++    int extra = this->padStateHandheld.active_handheld ? 1 : 0;
++    for (int i = 0; i < GAMEPADS_MAX - extra; i++)
++    {
++        padUpdate(&this->padsState[i]);
++        if (this->padsState[i].style_set == 0)
++            break;
++        padButtons |= padGetButtons(&this->padsState[i]);
++    }
++    return padButtons;
++}
++
++void SwitchInputManager::handlePadPointer()
++{
++    if (!this->padMouseReady)
++        return;
++
++    const Time now = getCPUTimeUsec();
++
++    // Fresh per-frame movement; position persists from the last sample.
++    // The stick doubles as the Nmouse wheel source, but sticks are pure
++    // gamepad navigation: the merged wheel is always ignored so it can
++    // never leak into the mouse layer (that would flash the cursor and
++    // flip the input type on every stick push). Mouse-mode scrolling is
++    // done by dragging, like touch; USB mice keep their own wheel path.
++    this->padMouseDeltaX = 0;
++    this->padMouseDeltaY = 0;
++    this->padMouseWheel  = 0;
++
++    // Clicks come straight from the pads (L/R = left, ZL/ZR = right),
++    // which is always live, unlike service samples. Adopt buttons held when mouse
++    // mode engages so a resting finger never fires a phantom click; a
++    // release drops them from the adopt mask so the next press counts.
++    const uint64_t padButtons = this->pollPadButtons();
++    this->padMousePadButtons = padButtons;
++    // Releases always drop out of the adopt mask (mode or not), so a stale
++    // mask can never swallow a future press.
++    this->padMouseAdoptButtons &= padButtons & PAD_MOUSE_CLICK_MASK;
++    const uint64_t freshButtons = padButtons & ~this->padMouseAdoptButtons;
++    const bool padLeft  = (freshButtons & ((uint64_t)HidNpadButton_L | (uint64_t)HidNpadButton_R)) != 0;
++    const bool padRight = (freshButtons & ((uint64_t)HidNpadButton_ZL | (uint64_t)HidNpadButton_ZR)) != 0;
++
++    HidNmouseHandle handle{};
++    if (R_SUCCEEDED(hidGetMergedNmouseHandle(&handle)))
++    {
++        HidNmouseStateWithDelta states[16];
++        size_t count = 0;
++        if (R_SUCCEEDED(hidGetNmouseStatesWithDelta(handle, states, 16, &count)) && count > 0)
++        {
++            const bool fresh = !this->padMouseFound || this->padMouseHandle.handle != handle.handle;
++            this->padMouseFound   = true;
++            this->padMouseHandle  = handle;
++            this->padMouseX       = states[0].x;
++            this->padMouseY       = states[0].y;
++            this->padMouseFlags   = states[0].flags;
++            if (!fresh)
++            {
++                for (size_t i = 0; i < count && states[i].sampling_number > this->padMouseSeen; i++)
++                {
++                    this->padMouseDeltaX += states[i].delta_x;
++                    this->padMouseDeltaY += states[i].delta_y;
++                }
++            }
++            this->padMouseSeen = states[0].sampling_number;
++            if (!this->padMouseLogged)
++            {
++                this->padMouseLogged = true;
++                Logger::info("PadMouse: Joy-Con mouse active");
++            }
++        }
++        else
++        {
++            // Pointer exists but produced no samples: clicks below still
++            // register; only the idle timeout applies otherwise.
++            this->padMouseFound  = true;
++            this->padMouseHandle = handle;
++        }
++    }
++    else
++    {
++        // No Joy-Con mouse right now. A held click still counts if the
++        // pointer was in use very recently (service handle flap), so a
++        // press is never swallowed; otherwise hand back to the controller.
++        this->padMouseFound     = false;
++        this->padMouseHasAnchor = false;
++        if (padLeft || padRight)
++        {
++            if (now - this->padMouseLastActive < PAD_MOUSE_IDLE_HIDE_USEC)
++            {
++                this->padMouseMode       = true;
++                this->padMouseLastActive = now;
++            }
++        }
++        else if (this->padMouseMode && now - this->padMouseLastActive >= PAD_MOUSE_IDLE_HIDE_USEC)
++            this->padMouseMode = false;
++        this->padMouseLeftDown  = padLeft;
++        this->padMouseRightDown = padRight;
++        return;
++    }
++
++    if (!this->padMouseHasAnchor)
++    {
++        this->padMouseAnchorX   = this->padMouseX;
++        this->padMouseAnchorY   = this->padMouseY;
++        this->padMouseHasAnchor = true;
++    }
++
++    // Movement only counts while the sensor tracks the surface (flags bit
++    // 1); a huge jump engages regardless, in case the bit is unavailable.
++    const int dx       = this->padMouseX - this->padMouseAnchorX;
++    const int dy       = this->padMouseY - this->padMouseAnchorY;
++    const int distSq   = dx * dx + dy * dy;
++    const bool tracked = (this->padMouseFlags & 0x2u) != 0;
++    const bool moved   = (tracked && distSq >= (PAD_MOUSE_MOVE_THRESHOLD * PAD_MOUSE_MOVE_THRESHOLD))
++        || distSq >= (PAD_MOUSE_TRACKLESS_JUMP * PAD_MOUSE_TRACKLESS_JUMP);
++    const bool clicked = padLeft || padRight;
++    // The stick is the Joy-Con wheel source and sticks are pure gamepad
++    // navigation, so the merged wheel never reaches the mouse layer.
++    // (Mouse-mode list scrolling is done by dragging, like touch; USB
++    // mice keep their own separate wheel path.)
++    const bool scrolled = false;
++
++    if (moved || clicked || scrolled)
++    {
++        if (!this->padMouseMode)
++        {
++            // Engaging: adopt held buttons silently so resting fingers do
++            // not fire phantom clicks; releases drop out of the mask above.
++            this->padMouseMode         = true;
++            this->padMouseAdoptButtons = padButtons & PAD_MOUSE_CLICK_MASK;
++        }
++        this->padMouseLastActive = now;
++        if (moved)
++        {
++            this->padMouseAnchorX = this->padMouseX;
++            this->padMouseAnchorY = this->padMouseY;
++        }
++        getMouseCusorOffsetChanged()->fire(Point((float)this->padMouseDeltaX, (float)this->padMouseDeltaY));
++        getMouseScrollOffsetChanged()->fire(Point(0, (float)this->padMouseWheel));
++    }
++    else if (this->padMouseMode && now - this->padMouseLastActive >= PAD_MOUSE_IDLE_HIDE_USEC)
++    {
++        // Unused for 3 s: back to controller mode (the cursor hides with it).
++        this->padMouseMode = false;
++    }
++
++    this->padMouseLeftDown  = padLeft;
++    this->padMouseRightDown = padRight;
++}
++#endif
++
+ void SwitchInputManager::upToDateMouseState()
+ {
+     hidGetMouseStates(&currentMouseState, 1);
+@@ -471,8 +755,50 @@ void SwitchInputManager::setPointerLock(bool lock)
+     pointerLocked = lock;
+ }
+ 
++bool SwitchInputManager::isMouseModeBinding(ControllerButton button)
++{
++#ifdef __SWITCH2__
++    if (button < 0 || button >= _BUTTON_MAX)
++        return false;
++    return this->padMouseMode && this->padMouseExitExempt[button];
++#else
++    (void)button;
++    return false;
++#endif
++}
++
++void SwitchInputManager::setMouseModeExitExempt(ControllerButton button, bool exempt)
++{
++#ifdef __SWITCH2__
++    if (button < 0 || button >= _BUTTON_MAX)
++        return;
++    this->padMouseExitExempt[button] = exempt;
++#else
++    (void)button;
++    (void)exempt;
++#endif
++}
++
+ void SwitchInputManager::drawCursor(NVGcontext* vg)
+ {
++#ifdef __SWITCH2__
++    if (this->padMouseReady && this->padMouseFromPad)
++    {
++        // Joy-Con mouse cursor: semi-transparent white dot, drawn in mouse
++        // mode even while the left button is held (35% idle, 65% pressed).
++        if (!pointerLocked && this->padMouseMode)
++        {
++            nvgBeginPath(vg);
++            nvgCircle(vg, lastCursorPosition.x, lastCursorPosition.y, PAD_MOUSE_DOT_RADIUS);
++            nvgFillColor(vg,
++                nvgRGBA(255, 255, 255,
++                    (this->padMouseLeftHeld || this->padMouseRightHeld) ? PAD_MOUSE_DOT_ALPHA_CLICK
++                                                                        : PAD_MOUSE_DOT_ALPHA));
++            nvgFill(vg);
++        }
++        return;
++    }
++#endif
+     initCursor(vg);
+     if (!pointerLocked)
+     {

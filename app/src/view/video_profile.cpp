@@ -53,7 +53,14 @@ void VideoProfile::update() {
             brls::Application::contentHeight, brls::Application::windowWidth, brls::Application::windowHeight));
     labelVideoCodec->setText(mpv.getString("video-codec"));
     labelVideoPixel->setText(mpv.getString("video-params/pixelformat"));
-    labelVideoHW->setText(mpv.getString("hwdec-current"));
+    /* Decoder identity via mpv's property pipeline (feeds OSD templates
+     * and stats the same way). current-tracks/video/decoder-desc reports
+     * the selected decoder by name, e.g. "h264_viddec (H.264 drako3d
+     * viddec)" on Switch 2 or the lavc decoder elsewhere; fall back to
+     * the hwdec interop state when no track is selected. */
+    std::string decDesc = mpv.getString("current-tracks/video/decoder-desc");
+    labelVideoHW->setText(
+        !decDesc.empty() ? decDesc : mpv.getString("hwdec-current"));
 
     auto cache = mpv.getNodeMap("demuxer-cache-state");
     double duration = mpv.getDouble("demuxer-cache-duration");

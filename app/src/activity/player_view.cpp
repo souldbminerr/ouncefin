@@ -233,7 +233,12 @@ void PlayerView::playMedia(const uint64_t seekTicks) {
                 },
                 {
                     {"Type", "Video"},
-#ifdef __SWITCH__
+#if defined(__SWITCH2__)
+                    /* T239 viddec supports H264/VP9/AV1/VP8 (no HEVC).
+                     * Excluding HEVC keeps it transcoding to H264 instead
+                     * of direct-playing into SW decode (frame drops). */
+                    {"VideoCodec", "h264,av1,vp9,vp8"},
+#elif defined(__SWITCH__)
                     {"VideoCodec", "h264,hevc,av1,vp9"},
 #elif defined(__PSV__)
                     {"AudioCodec", "aac,mp3"},

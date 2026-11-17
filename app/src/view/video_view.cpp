@@ -10,8 +10,29 @@
 #include "view/svg_image.hpp"
 #include "view/video_profile.hpp"
 #include "view/video_progress_slider.hpp"
+#if defined(__SWITCH__)
+#include <borealis/platforms/switch/switch_input.hpp>
+#endif
 
 const int VIDEO_SEEK_NODELAY = 0;
+
+#if defined(__SWITCH__)
+static bool isMouseModeSeek(brls::ControllerButton button) {
+    auto* manager = static_cast<brls::SwitchInputManager*>(
+        brls::Application::getPlatform()->getInputManager());
+    return manager && manager->isMouseModeBinding(button);
+}
+
+static void setMouseModeSeekExempt(bool exempt) {
+    auto* manager = static_cast<brls::SwitchInputManager*>(
+        brls::Application::getPlatform()->getInputManager());
+    if (!manager) return;
+    manager->setMouseModeExitExempt(brls::BUTTON_X, exempt);
+    manager->setMouseModeExitExempt(brls::BUTTON_A, exempt);
+    manager->setMouseModeExitExempt(brls::BUTTON_NAV_UP, exempt);
+    manager->setMouseModeExitExempt(brls::BUTTON_NAV_LEFT, exempt);
+}
+#endif
 
 using namespace brls::literals;
 
@@ -50,6 +71,11 @@ VideoView::VideoView() {
     if (MPVCore::OSD_TV_MODE) this->setTvMode(true);
 
     this->input = brls::Application::getPlatform()->getInputManager();
+
+#if defined(__SWITCH__)
+    // Mouse-mode-only seek bindings for this player (cleared in ~VideoView).
+    setMouseModeSeekExempt(true);
+#endif
 
     this->registerAction(
         "hints/back"_i18n, brls::BUTTON_B,
@@ -104,6 +130,14 @@ VideoView::VideoView() {
     this->registerActions(
         "main/player/setting"_i18n, brls::BUTTON_X, KeyBind::getSetting(),
         [this](brls::View* view) {
+#if defined(__SWITCH__)
+            if (isMouseModeSeek(brls::BUTTON_X)) {
+                CHECK_OSD(true);
+                this->seekingRange += getSeekRange(this->seekingRange);
+                this->requestSeeking(seekingRange);
+                return true;
+            }
+#endif
             CHECK_OSD(true);
             this->settingEvent.fire();
             return true;
@@ -113,6 +147,14 @@ VideoView::VideoView() {
     this->registerActions(
         "volumeUp", brls::BUTTON_NAV_UP, KeyBind::getVolumeUp(),
         [this](brls::View* view) -> bool {
+#if defined(__SWITCH__)
+            if (isMouseModeSeek(brls::BUTTON_NAV_UP)) {
+                CHECK_OSD(true);
+                this->seekingRange += getSeekRange(this->seekingRange);
+                this->requestSeeking(seekingRange);
+                return true;
+            }
+#endif
             CHECK_OSD(true);
             auto& state = brls::Application::getControllerState();
             if (state.buttons[brls::BUTTON_RT]) {
@@ -305,6 +347,14 @@ VideoView::VideoView() {
 
     this->registerActions(
         "main/player/toggle"_i18n, brls::BUTTON_A, KeyBind::getVideoPause(), [this](brls::View* view) {
+#if defined(__SWITCH__)
+            if (isMouseModeSeek(brls::BUTTON_A)) {
+                CHECK_OSD(true);
+                this->seekingRange -= getSeekRange(this->seekingRange);
+                this->requestSeeking(seekingRange);
+                return true;
+            }
+#endif
             CHECK_OSD(true);
             MPVCore::instance().togglePlay();
             if (MPVCore::OSD_ON_TOGGLE) {
@@ -312,6 +362,21 @@ VideoView::VideoView() {
             }
             return true;
         });
+
+#if defined(__SWITCH__)
+    this->registerAction(
+        "\uE08F", brls::BUTTON_NAV_LEFT,
+        [this](brls::View* view) -> bool {
+            if (isMouseModeSeek(brls::BUTTON_NAV_LEFT)) {
+                CHECK_OSD(true);
+                this->seekingRange -= getSeekRange(this->seekingRange);
+                this->requestSeeking(seekingRange);
+                return true;
+            }
+            return false;
+        },
+        true, true);
+#endif
 
     /// 视频详情信息
     this->profile = new VideoProfile();
@@ -334,6 +399,10 @@ VideoView::~VideoView() {
     brls::Logger::debug("trying delete VideoView...");
     this->unRegisterMpvEvent();
     disableDimming(false);
+
+#if defined(__SWITCH__)
+    setMouseModeSeekExempt(false);
+#endif
 
     MPVCore::instance().stop();
 }

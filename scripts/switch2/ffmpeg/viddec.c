@@ -13,6 +13,23 @@
 #include "libavutil/mem.h"
 #include "decode.h"
 
+/* ---- Identity reporting ----
+ * Exported (C linkage) so frontends can identify which viddec HW
+ * decoder engine is active and how many frames it has emitted.
+ * active_codec holds the ViddecCodec value, or -1 when none runs. */
+static int viddec_g_active_codec = -1;
+static unsigned long long viddec_g_frames_out;
+
+int viddec_active_codec(void)
+{
+    return viddec_g_active_codec;
+}
+
+unsigned long long viddec_frames_out(void)
+{
+    return viddec_g_frames_out;
+}
+
 #ifdef __SWITCH2__
 #include <switch/result.h>
 #include <switch2/video/decoder.h>
@@ -58,6 +75,9 @@ int viddec_create(ViddecBackend *b, AVCodecContext *avctx, int codec,
         return AVERROR_EXTERNAL;
     }
     b->created = true;
+    viddec_g_active_codec = codec;
+    /* New stream: restart the frame count for this engine. */
+    viddec_g_frames_out = 0;
     av_log(avctx, AV_LOG_INFO, "viddec: created codec=%d %dx%d %s\n",
            codec, cfg.width, cfg.height,
            tiling_block ? "block-linear" : "pitch-linear");
@@ -177,6 +197,7 @@ static int viddec_rq_emit_lowest(ViddecBackend *b, AVFrame *out)
     b->rq_len--;
     av_frame_move_ref(out, f);
     av_frame_free(&f);
+    viddec_g_frames_out++;
     return 1;
 }
 
@@ -372,6 +393,7 @@ void viddec_close(ViddecBackend *b)
     if (b->created) {
         videoDecoderClose(&b->dec);
         b->created = false;
+        viddec_g_active_codec = -1;
     }
     viddec_rq_clear(b);
     av_freep(&b->rq);

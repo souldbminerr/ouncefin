@@ -134,8 +134,6 @@ public:
     // 硬件解码
     inline static bool HARDWARE_DEC = false;
 #if defined(__SWITCH2__)
-    // Switch 2 (libounce/OunceVK): no public NVDEC/hwaccel in homebrew yet.
-    // Force software decode. MPV_SW_RENDER is forced ON by CMake for PLATFORM_SWITCH2.
     inline static std::string PLAYER_HWDEC_METHOD = "no";
 #elif defined(__SWITCH__) || defined(BOREALIS_USE_GXM) || defined(ANDROID)
     inline static std::string PLAYER_HWDEC_METHOD = "auto";
@@ -161,7 +159,7 @@ public:
 
     // 是否镜像视频
     inline static int VIDEO_FILTER = 0;
-    inline static int VIDEO_ROTATION = 0;
+
     // 强制的视频比例 (-1 为自动)
     inline static std::string VIDEO_ASPECT = "auto";
 

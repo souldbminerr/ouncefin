@@ -1,3 +1,17 @@
+# Ouncefin
+Jellyfin on Switch 2
+Features:
+ - Full audio and video support, including music
+ - Mouse mode
+ - 120hz display support for even 24hz division
+ - Hardware decoding via NVDEC on T239
+   - Most common formats are supported aside from H.265 (GSV limitation)
+   - For the formats that aren't supported, software is used (dav1d/ffmpeg software)
+ - High networking performance (Inmemory cache isn't needed, but reccomended)
+ - 4K output support for 4K videos.
+
+This is a fork of switchfin, the unmodified Switchfin readme follows
+
 # Switchfin
 
 <img src="scripts/switchfin.svg" alt="icon" height="128" width="128" align="left">
@@ -181,6 +195,62 @@ make -C build_switch Switchfin.nro -j$(nproc)
 # Debug with nxlink
 nxlink -a <YOUR_IP> -p Switchfin/Switchfin.nro -s Switchfin.nro --args -d -v
 ```
+
+### Nintendo Switch 2
+
+Requirements: devkitPro + ounce-devkit (libounce + drako3d), and the Switch 2 portlibs (FFmpeg with `*_viddec` decoders, libmpv). Run in msys2 or native linux shell
+
+```bash
+source /opt/devkitpro/switch2vars.sh
+# first time: configure (Ninja generator is required)
+aarch64-none-elf-cmake -S . -B build_switch2 \
+  -DPLATFORM_SWITCH2=ON -DUSE_DRAKO3D=ON \
+  -DCMAKE_BUILD_TYPE=Release -G Ninja
+# incremental build + package (rerun these two after any change)
+cmake --build build_switch2 -j8
+cmake --build build_switch2 --target Switchfin.nro -j8
+# output: build_switch2/Switchfin.nro
+```
+
+(`scripts/build-switch2.sh` does the configure + build in one go.)
+The borealis patches under `scripts/switch2/borealis/` are already applied
+to the in-tree copy at `library/borealis`; when forking borealis, apply
+them to the fork instead (see `scripts/switch2/borealis/README.md`).
+
+#### Switch 2 portlibs (FFmpeg + mpv)
+
+The app links static Switch 2 portlibs from `$DEVKITPRO/portlibs/switch2`.
+Build FFmpeg first (mpv depends on it). All commands run in msys2 after
+`sourcing switch2vars.sh`:
+
+```bash
+source /opt/devkitpro/switch2vars.sh
+# FFmpeg 7.1.5 + viddec HW decoders (h264/vp9/av1/vp8)
+bash scripts/switch2/ffmpeg/build-switch2-ffmpeg.sh
+# (same content as a dkp-pacman package: see scripts/switch2/ffmpeg/PKGBUILD)
+```
+
+Base Switch 1 portlibs it links against (`switch-zlib`, `switch-bzip2`,
+`switch-libass`, `switch-freetype`, `switch-mbedtls`, `switch-libdav1d`)
+come from normal `dkp-pacman`; the script overlays only the rebuilt
+FFmpeg onto the Switch 2 prefix.
+
+Then libmpv 0.36.0 (static, software render path only — there is no
+runtime GPU shader compiler on Switch 2, the app draws video with
+`MPV_SW_RENDER`):
+
+```bash
+source /opt/devkitpro/switch2vars.sh
+meson setup build-mpv mpv-0.36.0 \
+  --cross-file scripts/switch2-cross.ini \
+  --prefix "$DEVKITPRO/portlibs/switch2" --default-library static \
+  -Dlibmpv=true -Dcplayer=false -Dtests=false
+meson compile -C build-mpv
+meson install -C build-mpv
+```
+
+`scripts/switch2-cross.ini` is the meson cross file (`horizon` system,
+`cortex-a78c`, Switch 2 pkg-config + libounce include/link flags).
 
 ### Linux / macOS / Windows (Desktop)
 

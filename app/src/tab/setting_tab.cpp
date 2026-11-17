@@ -154,7 +154,7 @@ void SettingTab::onCreate() {
     btnOverClock->setVisibility(brls::Visibility::GONE);
 #endif
 
-    /// Hardware decode (Switch 2: software only, no NVDEC in homebrew yet)
+    /// Hardware decode (Switch 2: always on via viddec decoders; no mpv hwdec backend, so no toggle)
 #if defined(__SWITCH2__)
     btnHWDEC->setVisibility(brls::Visibility::GONE);
 #else
