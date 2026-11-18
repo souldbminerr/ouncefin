@@ -1,8 +1,44 @@
+diff --git a/library/include/borealis/core/application.hpp b/library/include/borealis/core/application.hpp
+index 31713045..865c054b 100644
+--- a/library/include/borealis/core/application.hpp
++++ b/library/include/borealis/core/application.hpp
+@@ -315,6 +315,13 @@ class Application
+         return inputType;
+     }
+ 
++    /**
++     * Sets the current input type (e.g. handing control back to the pads
++     * when a platform's pad mouse mode ends). Returns true if the type
++     * changed.
++     */
++    static bool setInputType(InputType type);
++
+     inline static void enableDebuggingView(bool enable)
+     {
+         debuggingViewEnabled = enable;
+@@ -381,9 +388,6 @@ class Application
+     inline static MouseState currentMouseState;
+     inline static NotificationManager* notificationManager;
+ 
+-    // Return true if input type was changed
+-    static bool setInputType(InputType type);
+-
+     inline static InputType inputType = InputType::GAMEPAD;
+     inline static std::vector<BrlsKeyState> watchedKeys;
+     inline static std::vector<BrlsKeyState> oldWatchedKeys;
 diff --git a/library/include/borealis/core/input.hpp b/library/include/borealis/core/input.hpp
-index 14580244..402c8998 100644
+index 14580244..9581e6e7 100644
 --- a/library/include/borealis/core/input.hpp
 +++ b/library/include/borealis/core/input.hpp
-@@ -345,6 +345,38 @@ class InputManager
+@@ -23,6 +23,7 @@
+ #include <borealis/core/geometry.hpp>
+ #include <borealis/core/time.hpp>
+ #include <vector>
++#include <string>
+ 
+ #define GAMEPADS_MAX 5
+ 
+@@ -345,6 +346,45 @@ class InputManager
  
      virtual void setPointerLock(bool lock) {};
  
@@ -30,6 +66,13 @@ index 14580244..402c8998 100644
 +     * Defaults to false.
 +     */
 +    virtual bool isPadMouseBinding(ControllerButton button) { (void)button; return false; };
++
++    /**
++     * Debug text describing the platform's motion-sensor state (e.g. the
++     * Joy-Cons' accelerometer for the pad mouse grip gate), or empty when
++     * unavailable.
++     */
++    virtual std::string getSensorDebugInfo() { return ""; };
 +
 +    /**
 +     * Whether the platform's pad-as-mouse is currently engaged (pointer
@@ -62,10 +105,10 @@ index c6ee8e08..8265ac82 100644
  };
  
 diff --git a/library/include/borealis/platforms/switch/switch_input.hpp b/library/include/borealis/platforms/switch/switch_input.hpp
-index 82c10e6c..587acf12 100644
+index 82c10e6c..96902982 100644
 --- a/library/include/borealis/platforms/switch/switch_input.hpp
 +++ b/library/include/borealis/platforms/switch/switch_input.hpp
-@@ -54,6 +54,14 @@ class SwitchInputManager : public InputManager
+@@ -54,6 +54,16 @@ class SwitchInputManager : public InputManager
  
      void drawCursor(NVGcontext* vg) override;
  
@@ -77,10 +120,12 @@ index 82c10e6c..587acf12 100644
 +
 +    bool isPadMouseMode() override;
 +
++    std::string getSensorDebugInfo() override;
++
      void sendRumbleRaw(float lowFreq, float highFreq, float lowAmp, float highAmp);
  
      void clearVibration(int controller);
-@@ -73,6 +81,39 @@ class SwitchInputManager : public InputManager
+@@ -73,6 +83,59 @@ class SwitchInputManager : public InputManager
      u32 padsStyleSet[GAMEPADS_MAX];
      bool pointerLocked = false;
      HidMouseState currentMouseState;
@@ -97,6 +142,12 @@ index 82c10e6c..587acf12 100644
 +    static constexpr int PAD_MOUSE_MOVE_THRESHOLD = 64;
 +    // Mouse mode ends (cursor hides) after this long without pointer use.
 +    static constexpr Time PAD_MOUSE_IDLE_HIDE_USEC = 3000000; // 3 s
++    // Mouse grip orientation: the Joy-Con stands on its side rail, so
++    // gravity runs along the face-plane horizontal axis — +1.0 on the left
++    // Joy-Con, -1.0 on the right; valid within 0.15 of each controller's
++    // value, disengaging immediately outside.
++    static constexpr float PAD_MOUSE_GRIP_MIN_ACCEL = 0.85f;
++    static constexpr float PAD_MOUSE_GRIP_MAX_ACCEL = 1.15f;
 +    // Cursor: semi-transparent white dot, brighter while clicking.
 +    static constexpr float PAD_MOUSE_DOT_RADIUS         = 9.0f;
 +    static constexpr uint8_t PAD_MOUSE_DOT_ALPHA        = 128; // 50 %
@@ -114,13 +165,27 @@ index 82c10e6c..587acf12 100644
 +    // Buttons the app bound to mouse-mode-only actions (see
 +    // setPadMouseBindings): they do not end mouse mode when pressed.
 +    bool padMouseBindings[_BUTTON_MAX] = {};
++
++    // Ends mouse mode and hands input back to the pads: the input type
++    // would otherwise stay TOUCH/MOUSE from the last mouse activity,
++    // leaving the sticks moving focus without the gamepad re-centering.
++    void exitPadMouseMode();
++
++    // Whether the pointer's controller is in the mouse-grip orientation
++    // (standing on its side rail; see PAD_MOUSE_GRIP_MIN_ACCEL).
++    bool padMouseGripOk();
++
++    // Six-axis read with the stale-default retry (see Status-Monitor-Deux
++    // workaround).
++    HidSixAxisSensorState readSixAxis(HidSixAxisSensorHandle handle);
++
 +    bool padMouseLeftDown = false, padMouseRightDown = false;
 +    bool padMouseLeftHeld = false, padMouseRightHeld = false;
 +#endif
      HidSixAxisSensorHandle m_six_axis_sensor_handle[4]; // All for player 1, player 2 not supported
  
      std::vector<bool> m_hid_keyboard_state;
-@@ -81,6 +122,9 @@ class SwitchInputManager : public InputManager
+@@ -81,6 +144,9 @@ class SwitchInputManager : public InputManager
  
      void initCursor(NVGcontext* vg);
      void handleMouse();
@@ -149,6 +214,26 @@ index bf05dc1d..c3b8edb4 100644
 +
 +#ifdef __SWITCH2__
 +    void draw(NVGcontext* vg, float x, float y, float width, float height, Style style, FrameContext* ctx) override;
++#endif
+ };
+ 
+ } // namespace brls
+diff --git a/library/include/borealis/views/debug_layer.hpp b/library/include/borealis/views/debug_layer.hpp
+index 53003a3f..07b44475 100644
+--- a/library/include/borealis/views/debug_layer.hpp
++++ b/library/include/borealis/views/debug_layer.hpp
+@@ -25,6 +25,15 @@ class DebugLayer : public Box
+ {
+   public:
+     DebugLayer();
++
++    void frame(FrameContext* ctx) override;
++
++  private:
++#ifdef __SWITCH2__
++    // Sensor HUD (bottom-left): the Joy-Cons' accelerometer for the pad
++    // mouse grip gate.
++    Label* sensorLabel = nullptr;
 +#endif
  };
  
@@ -576,9 +661,25 @@ index 13fb3520..4f4cea7f 100644
          nvgBeginPath(vg);
          nvgStrokeColor(vg, a(theme["brls/highlight/color1"]));
 diff --git a/library/lib/platforms/switch/switch_input.cpp b/library/lib/platforms/switch/switch_input.cpp
-index b6ac3a82..a8c03659 100644
+index b6ac3a82..f567800f 100644
 --- a/library/lib/platforms/switch/switch_input.cpp
 +++ b/library/lib/platforms/switch/switch_input.cpp
+@@ -14,6 +14,7 @@
+     limitations under the License.
+ */
+ 
++#include <math.h>
+ #include <borealis/core/application.hpp>
+ #include <borealis/platforms/switch/switch_input.hpp>
+ 
+@@ -105,7 +106,6 @@ SwitchInputManager::SwitchInputManager()
+     padInitialize(&this->padStateHandheld, HidNpadIdType_Handheld);
+     hidInitializeVibrationDevices(m_vibration_device_handheld, 2, HidNpadIdType_Handheld, HidNpadStyleTag_NpadHandheld);
+     padUpdate(&this->padStateHandheld);
+-
+     for (int i = 0; i < GAMEPADS_MAX; i++)
+     {
+         padInitialize(&this->padsState[i], (HidNpadIdType)i);
 @@ -119,7 +119,6 @@ SwitchInputManager::SwitchInputManager()
      hidInitializeKeyboardMap();
  
@@ -587,7 +688,22 @@ index b6ac3a82..a8c03659 100644
      // It's necessary to initialize these separately as they all have different handle values
      hidGetSixAxisSensorHandles(&this->m_six_axis_sensor_handle[0], 1, HidNpadIdType_Handheld, HidNpadStyleTag_NpadHandheld);
      hidGetSixAxisSensorHandles(&this->m_six_axis_sensor_handle[1], 1, HidNpadIdType_No1, HidNpadStyleTag_NpadFullKey);
-@@ -142,6 +141,93 @@ SwitchInputManager::~SwitchInputManager()
+@@ -128,6 +127,14 @@ SwitchInputManager::SwitchInputManager()
+     hidStartSixAxisSensor(this->m_six_axis_sensor_handle[1]);
+     hidStartSixAxisSensor(this->m_six_axis_sensor_handle[2]);
+     hidStartSixAxisSensor(this->m_six_axis_sensor_handle[3]);
++
++    // Bind the applet resource user id to the hid service: without it the
++    // six-axis reads return the stale default {0, 0, -1} (Status-Monitor-
++    // Deux's workaround for the same quirk).
++    u64 aruid = appletGetAppletResourceUserId();
++    Result rc = serviceDispatchIn(hidsysGetServiceSession(), 500, aruid);
++    if (R_FAILED(rc))
++        Logger::warning("SixAxis: hidsys applet resource binding failed: 0x{:x}", (unsigned)rc);
+ }
+ 
+ SwitchInputManager::~SwitchInputManager()
+@@ -142,6 +149,173 @@ SwitchInputManager::~SwitchInputManager()
      hidStopSixAxisSensor(this->m_six_axis_sensor_handle[2]);
      hidStopSixAxisSensor(this->m_six_axis_sensor_handle[3]);
  
@@ -603,7 +719,7 @@ index b6ac3a82..a8c03659 100644
 +    if (this->padMouseEnabled == enabled)
 +        return;
 +    this->padMouseEnabled = enabled;
-+    this->padMouseMode    = false;
++    this->exitPadMouseMode();
 +    this->padMouseHasAnchor = false;
 +    if (enabled)
 +    {
@@ -678,10 +794,90 @@ index b6ac3a82..a8c03659 100644
 +#else
 +    return false;
 +#endif
++}
++
++std::string SwitchInputManager::getSensorDebugInfo()
++{
++#ifdef __SWITCH2__
++    const HidSixAxisSensorState left  = this->readSixAxis(this->m_six_axis_sensor_handle[2]);
++    const HidSixAxisSensorState right = this->readSixAxis(this->m_six_axis_sensor_handle[3]);
++
++    // Verdict per controller: the left is in grip while accel.x sits within
++    // 0.15 of +1.0, the right within 0.15 of -1.0.
++    auto grip = [](float x, bool isLeft) {
++        if (isLeft)
++            return x >= PAD_MOUSE_GRIP_MIN_ACCEL && x <= PAD_MOUSE_GRIP_MAX_ACCEL;
++        return x >= -PAD_MOUSE_GRIP_MAX_ACCEL && x <= -PAD_MOUSE_GRIP_MIN_ACCEL;
++    };
++
++    return fmt::format(
++        "LC accel({:+.2f},{:+.2f},{:+.2f}) {}\n"
++        "RC accel({:+.2f},{:+.2f},{:+.2f}) {}",
++        left.acceleration.x, left.acceleration.y, left.acceleration.z,
++        grip(left.acceleration.x, true) ? "grip" : "----",
++        right.acceleration.x, right.acceleration.y, right.acceleration.z,
++        grip(right.acceleration.x, false) ? "grip" : "----");
++#else
++    return "";
++#endif
++}
++
++void SwitchInputManager::exitPadMouseMode()
++{
++#ifdef __SWITCH2__
++    if (!this->padMouseMode)
++        return;
++    this->padMouseMode = false;
++    this->padMouseAnchorX = this->padPointer.x;
++    this->padMouseAnchorY = this->padPointer.y;
++    // Hand control back to the pads: the input type stays TOUCH from the
++    // last mouse activity otherwise, and gamepad focus behaviour (list
++    // re-centering etc.) is gated on the GAMEPAD type in borealis.
++    Application::setInputType(InputType::GAMEPAD);
++#endif
++}
++
++bool SwitchInputManager::padMouseGripOk()
++{
++#ifdef __SWITCH2__
++    // In the mouse grip the Joy-Con stands on its side rail: gravity runs
++    // along the face-plane horizontal axis — +1.0 on the left Joy-Con,
++    // -1.0 on the right. Each controller is valid within 0.15 of its own
++    // value; the gate stays open while either one sits in its window (the
++    // mouse can be either Joy-Con).
++    const HidSixAxisSensorState left  = this->readSixAxis(this->m_six_axis_sensor_handle[2]);
++    const HidSixAxisSensorState right = this->readSixAxis(this->m_six_axis_sensor_handle[3]);
++    const float lx = left.acceleration.x;
++    const float rx = right.acceleration.x;
++    const bool leftGrip  = lx >= PAD_MOUSE_GRIP_MIN_ACCEL && lx <= PAD_MOUSE_GRIP_MAX_ACCEL;
++    const bool rightGrip = rx >= -PAD_MOUSE_GRIP_MAX_ACCEL && rx <= -PAD_MOUSE_GRIP_MIN_ACCEL;
++    return leftGrip || rightGrip;
++#else
++    return true;
++#endif
++}
++
++HidSixAxisSensorState SwitchInputManager::readSixAxis(HidSixAxisSensorHandle handle)
++{
++#ifdef __SWITCH2__
++    HidSixAxisSensorState s = { 0 };
++    hidGetSixAxisSensorStates(handle, &s, 1);
++    if (s.acceleration.x == 0.f && s.acceleration.y == 0.f && s.acceleration.z == -1.f)
++    {
++        // Stale default state: bind the applet resource user id to the hid
++        // service and retry (Status-Monitor-Deux's workaround).
++        u64 aruid = appletGetAppletResourceUserId();
++        serviceDispatchIn(hidsysGetServiceSession(), 500, aruid);
++        hidGetSixAxisSensorStates(handle, &s, 1);
++    }
++    return s;
++#else
++    return { 0 };
++#endif
  }
  
  void SwitchInputManager::clearVibration(int controller)
-@@ -193,6 +279,25 @@ void SwitchInputManager::updateUnifiedControllerState(ControllerState* state)
+@@ -193,6 +367,25 @@ void SwitchInputManager::updateUnifiedControllerState(ControllerState* state)
          state->buttons[BUTTON_A] |= getKeyboardKeyState(BRLS_KBD_KEY_ENTER);
          state->buttons[BUTTON_B] |= getKeyboardKeyState(BRLS_KBD_KEY_ESCAPE);
      }
@@ -698,7 +894,7 @@ index b6ac3a82..a8c03659 100644
 +        {
 +            if (state->buttons[j] && !this->padMouseBindings[j])
 +            {
-+                this->padMouseMode = false;
++                this->exitPadMouseMode();
 +                break;
 +            }
 +        }
@@ -707,7 +903,7 @@ index b6ac3a82..a8c03659 100644
  }
  
  short SwitchInputManager::getControllersConnectedCount()
-@@ -235,6 +340,14 @@ void SwitchInputManager::updateControllerStateInner(ControllerState* state, PadS
+@@ -235,6 +428,14 @@ void SwitchInputManager::updateControllerStateInner(ControllerState* state, PadS
      padUpdate(pad);
      uint64_t keysDown = padGetButtons(pad);
  
@@ -722,7 +918,7 @@ index b6ac3a82..a8c03659 100644
      bool full = pad->style_set & HidNpadStyleSet_NpadFullCtrl;
  
      for (size_t i = 0; i < _BUTTON_MAX; i++)
-@@ -286,6 +399,15 @@ void SwitchInputManager::updateTouchStates(std::vector<RawTouchState>* states)
+@@ -286,6 +487,15 @@ void SwitchInputManager::updateTouchStates(std::vector<RawTouchState>* states)
              state.position.y = hidState.touches[i].y / Application::windowScale;
              states->push_back(state);
          }
@@ -738,7 +934,7 @@ index b6ac3a82..a8c03659 100644
      }
  }
  
-@@ -351,6 +473,32 @@ void SwitchInputManager::sendRumble(unsigned short controller, unsigned short lo
+@@ -351,6 +561,32 @@ void SwitchInputManager::sendRumble(unsigned short controller, unsigned short lo
  
  void SwitchInputManager::updateMouseStates(RawMouseState* state)
  {
@@ -771,7 +967,7 @@ index b6ac3a82..a8c03659 100644
      if (currentMouseState.attributes & HidMouseAttribute_IsConnected)
      {
          state->position     = Point(currentMouseState.x, currentMouseState.y);
-@@ -361,28 +509,128 @@ void SwitchInputManager::updateMouseStates(RawMouseState* state)
+@@ -361,28 +597,141 @@ void SwitchInputManager::updateMouseStates(RawMouseState* state)
          state->rightButton  = currentMouseState.buttons & HidMouseButton_Right;
          lastCursorPosition  = state->position;
      }
@@ -837,34 +1033,47 @@ index b6ac3a82..a8c03659 100644
 +    const int distSq  = netX * netX + netY * netY;
 +    const bool netMoved = moved && distSq >= PAD_MOUSE_MOVE_THRESHOLD * PAD_MOUSE_MOVE_THRESHOLD;
 +
++    // Mouse grip orientation gate: engage only with the Joy-Con standing on
++    // its side rail, and disengage when that is violated (with a short
++    // grace so transient slide acceleration cannot drop the mode
++    // mid-stroke).
++    const bool gripOk = this->padMouseGripOk();
++
 +    if (this->padMouseMode)
 +    {
-+        // While mouse mode is on, L/R/ZL/ZR belong to the pointer for the
-+        // whole mode (clicks, never pad actions). Real use keeps the mode
-+        // alive: net travel from the anchor (so sensor jitter while
-+        // resting never counts), wheel scroll, or a click.
-+        if (netMoved || scrolled || leftDown || rightDown)
++        if (!gripOk)
 +        {
-+            this->padMouseLastActive = now;
-+            if (netMoved)
++            // Out of the mouse grip: back to controller mode immediately.
++            this->exitPadMouseMode();
++        }
++        else
++        {
++            // While mouse mode is on, L/R/ZL/ZR belong to the pointer for the
++            // whole mode (clicks, never pad actions). Real use keeps the mode
++            // alive: net travel from the anchor (so sensor jitter while
++            // resting never counts), wheel scroll, or a click.
++            if (netMoved || scrolled || leftDown || rightDown)
 +            {
-+                this->padMouseAnchorX = this->padPointer.x;
-+                this->padMouseAnchorY = this->padPointer.y;
++                this->padMouseLastActive = now;
++                if (netMoved)
++                {
++                    this->padMouseAnchorX = this->padPointer.x;
++                    this->padMouseAnchorY = this->padPointer.y;
++                }
++            }
++            else if (now - this->padMouseLastActive >= PAD_MOUSE_IDLE_HIDE_USEC)
++            {
++                // Unused for 3 s: back to controller mode (cursor hides).
++                this->exitPadMouseMode();
 +            }
 +        }
-+        else if (now - this->padMouseLastActive >= PAD_MOUSE_IDLE_HIDE_USEC)
-+        {
-+            // Unused for 3 s: back to controller mode (cursor hides).
-+            this->padMouseMode = false;
-+            this->padMouseAnchorX = this->padPointer.x;
-+            this->padMouseAnchorY = this->padPointer.y;
-+        }
 +    }
-+    else if (netMoved || scrolled)
++    else if ((netMoved || scrolled) && gripOk)
 +    {
 +        // Engagement requires real travel or scroll — never a bare click,
 +        // so resting fingers cannot phantom-click, and a press on an
-+        // idle pointer stays with the pads.
++        // idle pointer stays with the pads — plus the mouse-grip
++        // orientation.
 +        this->padMouseMode = true;
 +        this->padMouseLastActive = now;
 +        this->padMouseAnchorX = this->padPointer.x;
@@ -900,7 +1109,7 @@ index b6ac3a82..a8c03659 100644
  }
  
  void SwitchInputManager::handleKeyboard()
-@@ -473,6 +721,21 @@ void SwitchInputManager::setPointerLock(bool lock)
+@@ -473,6 +822,21 @@ void SwitchInputManager::setPointerLock(bool lock)
  
  void SwitchInputManager::drawCursor(NVGcontext* vg)
  {
@@ -922,7 +1131,7 @@ index b6ac3a82..a8c03659 100644
      initCursor(vg);
      if (!pointerLocked)
      {
-@@ -484,6 +747,7 @@ void SwitchInputManager::drawCursor(NVGcontext* vg)
+@@ -484,6 +848,7 @@ void SwitchInputManager::drawCursor(NVGcontext* vg)
          nvgFillPaint(vg, this->paint);
          nvgFill(vg);
      }
@@ -1037,6 +1246,51 @@ index 080b9ebc..43ccd1d3 100644
  
  void BooleanCell::scaleTick()
  {
+diff --git a/library/lib/views/debug_layer.cpp b/library/lib/views/debug_layer.cpp
+index 2a1fb519..8321fa68 100644
+--- a/library/lib/views/debug_layer.cpp
++++ b/library/lib/views/debug_layer.cpp
+@@ -17,6 +17,7 @@
+ #include <yoga/YGNode.h>
+ 
+ #include <borealis/core/application.hpp>
++#include <borealis/core/platform.hpp>
+ #include <borealis/core/thread.hpp>
+ #include <borealis/views/debug_layer.hpp>
+ #include <borealis/views/label.hpp>
+@@ -102,6 +103,32 @@ DebugLayer::DebugLayer()
+ 
+             if (contentView->getChildren().size() > brls::Application::contentHeight / 10 - 1)
+                 contentView->removeView(contentView->getChildren()[contentView->getChildren().size() - 1]); }); });
++
++#ifdef __SWITCH2__
++    // Sensor HUD, anchored bottom-left: the Joy-Cons' accelerometer for
++    // the pad mouse grip gate (angles within 15 deg of the side rail
++    // count as grip).
++    Box* sensorPanel = new Box(Axis::COLUMN);
++    sensorPanel->setPadding(5);
++    sensorPanel->setBackgroundColor(RGBA(0, 0, 0, 160));
++    YGNodeStyleSetPositionType(sensorPanel->getYGNode(), YGPositionTypeAbsolute);
++    YGNodeStyleSetPosition(sensorPanel->getYGNode(), YGEdgeLeft, 5);
++    YGNodeStyleSetPosition(sensorPanel->getYGNode(), YGEdgeBottom, 5);
++    this->sensorLabel = new Label();
++    this->sensorLabel->setFontSize(8);
++    this->sensorLabel->setTextColor(RGBA(200, 200, 200, 220));
++    sensorPanel->addView(this->sensorLabel);
++    this->addView(sensorPanel);
++#endif
++}
++
++void DebugLayer::frame(FrameContext* ctx)
++{
++    Box::frame(ctx);
++#ifdef __SWITCH2__
++    if (this->sensorLabel)
++        this->sensorLabel->setText(brls::Application::getPlatform()->getInputManager()->getSensorDebugInfo());
++#endif
+ }
+ 
+ } // namespace brls
 diff --git a/library/lib/views/dialog.cpp b/library/lib/views/dialog.cpp
 index 33744bfe..bf218e4c 100644
 --- a/library/lib/views/dialog.cpp
