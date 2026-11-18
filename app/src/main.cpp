@@ -84,6 +84,12 @@ int main(int argc, char* argv[]) {
 #if defined(__SWITCH2__)
     // S2 ONLY, real panel resolution
     Switch2Display::init();
+
+    // The Switch input manager only exists after createWindow (it is
+    // created in SwitchPlatform::createWindow), so apply the Joy-Con
+    // mouse setting here, not right after Application::init().
+    brls::Application::getPlatform()->getInputManager()->setPadMouseEnabled(
+        conf.getItem(AppConfig::PAD_MOUSE, true));
 #endif
 
     // Have the application register an action on every activity that will quit when you press BUTTON_START

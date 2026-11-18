@@ -45,38 +45,34 @@ borealis `0303fe7f`; same apply procedure as above.
 
 Behavior, all inside `library/.../switch/switch_input.{hpp,cpp}`:
 
-- Uses the raw `HidNmouse` API (`hidInitializeNmouse`, merged Joy-Con
-  handle, `hidGetNmouseStatesWithDelta` — the same pattern as
-  moonlight-nx2's proven `platform.c`, with OpenRCT2-Switch's button
-  config: triggers ZL/ZR = left-click group, shoulders L/R = right-click
-  group). A Joy-Con in mouse position drives `RawMouseState`, so tap
-  (click), pan (drag) and scroll (Joy-Con stick = wheel) gestures work;
-  clicks themselves come straight from live pad polling (ZL = left,
-  ZR = right), so no service mapping can double-fire or drop them.
-  Adopt-on-engage keeps resting fingers from phantom-clicking, and
-  engagement requires tracked sensor movement (64 px net, 256 px
-  fallback). `processInput` revalidates the cached mouse view against the
-  current content tree, so clicks after a navigation (dialogs, dropdowns,
-  tabs) always hit-test fresh instead of dispatching to detached views.
-- Pointer area is fixed at 1920x1080 and mapped to layout points, so the
-  cursor and hit-testing stay correct in every UI scale, handheld and docked.
-- Controller/mouse modes: movement of 64 px or more, a pointer click, or
-  scrolling enters mouse mode; any controller button press, pointer loss,
-  or 3 s without mouse use returns to controller mode. In mouse mode
-  ZL/ZR are masked from the pad (they report `HidMouseButton_Left`, i.e.
-  click, by default) instead of triggering controller actions.
-- Cursor is a semi-transparent white dot (35% idle, 65% while the left
-  button is held) drawn in mouse mode even while clicking; the USB-mouse
-  image path is unchanged.
-- Context click: `setPadMouseRightClick()` (default right) maps pad ZL/ZR
-  to right- or left-click; the player opts into left-click. The tap
-  gesture treats right-click as the secondary tap and fires the view's
-  `BUTTON_X` actions for it (touch taps stay `BUTTON_A`), so right-click
-  works like the X button everywhere, including real USB mice.
-- Mouse-mode bindings: `InputManager::isMouseModeBinding()` (default
-  `false`, so other platforms are untouched) reports buttons the app bound
-  to mouse mode. Switch overrides it from the exit-exempt mask
-  (`setMouseModeExitExempt()`); `handleAction` neither dismisses nor
-  gamepad-flips such buttons, so consuming them never hides the cursor.
-  Switchfin's video player uses this for mouse-mode-only seeks (X/DpadUp
-  forward, A/DpadLeft back); see `VideoView` in the main repo.
+- Built on libounce's native `PadPointer` API (`padPointerInitialize`,
+  `padPointerUpdate`, `padPointerGetButtons`) — per-device Joy-Con
+  handles. It deliberately never calls `hidSetMergedNmouseSourceTypes`:
+  the merged pointer hands the Joy-Con sticks to the pointer service,
+  which kills stick navigation on the pads. `PadPointer` leaves the
+  sticks alone until a Joy-Con actually slides on a surface.
+- Opt-in through `InputManager::setPadMouseEnabled()` (default no-op on
+  other platforms). Switchfin wires it to the "Joy-Con mouse" settings
+  toggle; with it off, no Nmouse service is initialized and the pads
+  keep every button and stick.
+- Engagement requires real pointer travel (64 px net from the anchor)
+  or wheel scroll — never a bare click, so resting fingers cannot
+  phantom-click and a press on an idle pointer stays a pad press.
+- While in mouse mode, the mouse layer owns L/R/ZL/ZR (clicks) only for
+  1 s after its last use; idle in mouse mode hands the buttons back to
+  the pads (video seek) until the pointer moves again. Any controller
+  button press, touch, pointer loss, or 3 s without use ends mouse mode
+  and hides the cursor.
+- The tap gesture treats right-click as the secondary tap and fires the
+  view's `BUTTON_X` actions for it (touch taps stay `BUTTON_A`), so
+  right-click works like the X button everywhere, including real USB
+  mice. `processInput` revalidates the cached mouse view against the
+  current content tree, so clicks after a navigation (dialogs,
+  dropdowns, tabs) always hit-test fresh instead of dispatching to
+  detached views.
+- Pointer area is fixed at 1920x1080 and mapped to layout points, so
+  the cursor and hit-testing stay correct in every UI scale, handheld
+  and docked. Cursor is a semi-transparent white dot (50% idle, 75%
+  while a click is held). There is no image cursor path and no ordinary
+  (USB) mouse support on Switch 2: the Joy-Con pointer is the only mouse
+  source, so nothing is left stuck on screen when the mouse is off.

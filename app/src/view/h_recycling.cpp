@@ -1,45 +1,27 @@
 #include "view/h_recycling.hpp"
-#include <borealis/core/application.hpp>
 
-bool HRecyclerFrame::isFocusInsideCell(brls::View* cell) {
-    for (brls::View* v = brls::Application::getCurrentFocus(); v; v = v->getParent()) {
-        if (v == cell) return true;
-    }
-    return false;
-}
-
-brls::View* HRecyclerFrame::focusFirstCell() {
-    this->gamepadFocusLost = false;
-    this->selectRowAt(this->defaultCellFocus, false);
-    for (View* view : contentBox->getChildren()) {
-        if (*((size_t*)view->getParentUserData()) == this->defaultCellFocus) {
-            View* focus = view->getDefaultFocus();
-            if (focus) return focus;
+brls::View* HRecyclerFrame::getNextCellFocus(brls::FocusDirection direction, brls::View* currentView) {
+    // Gamepad focus can dangle when the mouse scrolls the focused cell out
+    // of the recycling window (the view gets detached from contentBox).
+    // Detect that here — the one place navigation actually happens — and
+    // re-anchor on the default cell instead of navigating from a detached
+    // view (whose parent data may already be gone).
+    bool attached = false;
+    for (brls::View* v = currentView; v; v = v->getParent()) {
+        if (v == this->contentBox) {
+            attached = true;
             break;
         }
     }
-    return nullptr;
-}
-
-brls::View* HRecyclerFrame::getNextCellFocus(brls::FocusDirection direction, brls::View* currentView) {
-    if (this->gamepadFocusLost
-        && ((this->contentBox->getAxis() == brls::Axis::ROW
-                && (direction == brls::FocusDirection::LEFT || direction == brls::FocusDirection::RIGHT))
-            || (this->contentBox->getAxis() == brls::Axis::COLUMN
-                && (direction == brls::FocusDirection::UP || direction == brls::FocusDirection::DOWN)))) {
-        brls::View* cell = currentView;
-        while (cell && cell->getParent() != this->contentBox) cell = cell->getParent();
-        if (cell) {
-            for (auto it : this->contentBox->getChildren()) {
-                if (it == cell) {
-                    this->gamepadFocusLost = false;
-                    break;
-                }
+    if (!attached) {
+        this->selectRowAt(this->defaultCellFocus, false);
+        for (View* view : contentBox->getChildren()) {
+            if (*((size_t*)view->getParentUserData()) == this->defaultCellFocus) {
+                if (View* focus = view->getDefaultFocus()) return focus;
+                break;
             }
         }
-        if (this->gamepadFocusLost) {
-            if (View* first = this->focusFirstCell()) return first;
-        }
+        return nullptr;
     }
 
     void* parentUserData = currentView->getParentUserData();
@@ -114,12 +96,7 @@ HRecyclerFrame::~HRecyclerFrame() {
 }
 
 brls::View* HRecyclerFrame::getDefaultFocus() {
-    if (this->dataSource && this->dataSource->getItemCount() > 0) {
-        if (this->gamepadFocusLost) {
-            if (View* first = this->focusFirstCell()) return first;
-        }
-        return HScrollingFrame::getDefaultFocus();
-    }
+    if (this->dataSource && this->dataSource->getItemCount() > 0) return HScrollingFrame::getDefaultFocus();
     return nullptr;
 }
 
@@ -181,7 +158,6 @@ void HRecyclerFrame::notifyDataChanged() {
 }
 
 void HRecyclerFrame::selectRowAt(size_t index, bool animated) {
-    this->gamepadFocusLost = false;
     this->setContentOffsetX(getWidthByCellIndex(index), animated);
     this->cellsRecyclingLoop();
 
@@ -214,7 +190,6 @@ void HRecyclerFrame::cellsRecyclingLoop() {
         renderedFrame.origin.x += cellWidth;
         renderedFrame.size.width -= cellWidth;
 
-        if (isFocusInsideCell(minCell) || minCell == contentBox->getLastFocusedView()) this->gamepadFocusLost = true;
         queueReusableCell(minCell);
         this->removeCell(minCell);
 
@@ -233,7 +208,6 @@ void HRecyclerFrame::cellsRecyclingLoop() {
 
         renderedFrame.size.width -= cellWidth;
 
-        if (isFocusInsideCell(maxCell) || maxCell == contentBox->getLastFocusedView()) this->gamepadFocusLost = true;
         queueReusableCell(maxCell);
         this->removeCell(maxCell);
 

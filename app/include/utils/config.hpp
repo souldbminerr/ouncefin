@@ -123,6 +123,8 @@ public:
         KEY_VIDEO_SPEED,    // 视频倍速菜单快捷键
         KEY_VIDEO_OSD,      // 切换OSD显示
         KEY_VIDEO_PAUSE,    // 视频播放暂停快捷键
+
+        PAD_MOUSE,          // Switch 2: Joy-Con mouse (pad-as-mouse)
     };
 
     AppConfig() = default;

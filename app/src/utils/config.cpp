@@ -87,6 +87,7 @@ std::unordered_map<AppConfig::Item, AppConfig::Option> AppConfig::settingMap = {
         }},
     {PLAYER_HWDEC, {"player_hwdec"}},
     {PLAYER_HWDEC_CUSTOM, {"player_hwdec_custom"}},
+    {PAD_MOUSE, {"pad_mouse"}},
     {PLAYER_ASPECT, {"player_aspect", {"auto", "stretch", "crop", "4:3", "16:9"}}},
     {PLAYER_TV_MODE, {"player_tv_mode"}},
     {DANMAKU, {"danmaku"}},

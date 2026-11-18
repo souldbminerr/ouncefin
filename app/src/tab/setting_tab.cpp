@@ -154,6 +154,18 @@ void SettingTab::onCreate() {
     btnOverClock->setVisibility(brls::Visibility::GONE);
 #endif
 
+    /// Joy-Con mouse (Switch 2 only): hands a laid-down Joy-Con to the
+    /// pointer service; sticks and shoulders stay with the pads.
+#if defined(__SWITCH2__)
+    btnMouseMode->init(
+        "main/setting/others/mouse"_i18n, conf.getItem(AppConfig::PAD_MOUSE, true), [&conf](bool value) {
+            brls::Application::getPlatform()->getInputManager()->setPadMouseEnabled(value);
+            conf.setItem(AppConfig::PAD_MOUSE, value);
+        });
+#else
+    btnMouseMode->setVisibility(brls::Visibility::GONE);
+#endif
+
     /// Hardware decode (Switch 2: always on via viddec decoders; no mpv hwdec backend, so no toggle)
 #if defined(__SWITCH2__)
     btnHWDEC->setVisibility(brls::Visibility::GONE);

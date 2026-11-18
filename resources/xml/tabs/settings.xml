@@ -207,6 +207,8 @@
                 <brls:BooleanCell
                     id="setting/overclock" />
                 <brls:BooleanCell
+                    id="setting/mouse" />
+                <brls:BooleanCell
                     id="setting/sync" />
                 <SelectorCell
                     id="setting/language"

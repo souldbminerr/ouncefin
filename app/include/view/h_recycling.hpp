@@ -30,8 +30,6 @@ public:
     void selectRowAt(size_t index, bool animated);
     float getWidthByCellIndex(size_t index, size_t start = 0);
 
-    bool gamepadFocusLost = false;
-
     /// 导航到页面尾部时触发回调函数
     void onNextPage(const std::function<void()>& callback = nullptr);
 
@@ -64,7 +62,4 @@ private:
     void cellsRecyclingLoop();
     void addCellAt(size_t index, int downSide);
     bool checkHeight();
-
-    brls::View* focusFirstCell();
-    bool isFocusInsideCell(brls::View* cell);
 };

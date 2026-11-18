@@ -56,6 +56,7 @@ private:
     BRLS_BIND(brls::BooleanCell, btnAlwaysOnTop, "setting/always_on_top");
     BRLS_BIND(brls::BooleanCell, btnSingle, "setting/single");
     BRLS_BIND(brls::BooleanCell, btnOverClock, "setting/overclock");
+    BRLS_BIND(brls::BooleanCell, btnMouseMode, "setting/mouse");
     BRLS_BIND(brls::BooleanCell, btnDebug, "setting/debug");
     BRLS_BIND(brls::BooleanCell, btnSync, "setting/sync");
     BRLS_BIND(brls::SelectorCell, inputThreads, "setting/network/threads");
