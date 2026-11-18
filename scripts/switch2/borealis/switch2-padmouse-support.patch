@@ -130,6 +130,29 @@ index 82c10e6c..587acf12 100644
      void handleKeyboard();
      void handleControllerSensors();
      void upToDateMouseState();
+diff --git a/library/include/borealis/views/cells/cell_bool.hpp b/library/include/borealis/views/cells/cell_bool.hpp
+index bf05dc1d..c3b8edb4 100644
+--- a/library/include/borealis/views/cells/cell_bool.hpp
++++ b/library/include/borealis/views/cells/cell_bool.hpp
+@@ -50,10 +50,18 @@ class BooleanCell : public DetailCell
+     float baseDetailTextSize;
+ 
+     Animatable scale = 1;
++#ifdef __SWITCH2__
++    // Eased slide parameter of the Switch 2 pill toggle (0 = off, 1 = on).
++    Animatable switchP = 0;
++#endif
+     Event<bool> event;
+ 
+     void updateUI();
+     void scaleTick();
++
++#ifdef __SWITCH2__
++    void draw(NVGcontext* vg, float x, float y, float width, float height, Style style, FrameContext* ctx) override;
++#endif
+ };
+ 
+ } // namespace brls
 diff --git a/library/lib/core/application.cpp b/library/lib/core/application.cpp
 index c7d67dcb..27c859eb 100644
 --- a/library/lib/core/application.cpp
@@ -231,6 +254,198 @@ index 31580135..2f4b8270 100644
      };
  }
  
+diff --git a/library/lib/core/view.cpp b/library/lib/core/view.cpp
+index 13fb3520..5ec72850 100644
+--- a/library/lib/core/view.cpp
++++ b/library/lib/core/view.cpp
+@@ -43,6 +43,174 @@
+ 
+ using namespace brls::literals;
+ 
++#ifdef __SWITCH2__
++// Switch 2 selection border: a four-colour wheel (Electric Blue, Cyan,
++// Periwinkle, Pink) rotates around the border ring, matching the system UI
++// and the Ultrahand S2 reference. Cyan and Pink pulse bright<->deep, locked
++// to the rotation (four pulses per turn, full turn every 6 s).
++namespace {
++
++struct S2Wheel
++{
++    float rotFrac; // rotation offset, one full turn every 6 s
++    NVGcolor a[4]; // anchors of the sweep: [0] Electric Blue, [1] Cyan,
++                   // [2] Periwinkle, [3] Pink; they sit (after rotation) at
++                   // s = 0.25, 0.5, 0.75 and 0 respectively.
++};
++
++static NVGcolor s2Lerp(NVGcolor c0, NVGcolor c1, float t)
++{
++    return nvgRGBAf(c0.r + (c1.r - c0.r) * t, c0.g + (c1.g - c0.g) * t,
++        c0.b + (c1.b - c0.b) * t, c0.a + (c1.a - c0.a) * t);
++}
++
++static S2Wheel s2MakeWheel()
++{
++    const double now = (double)brls::getCPUTimeUsec() / 1000000.0;
++    const float rotFrac = (float)fmod(now, 6.0) / 6.0f;
++
++    // Pulse locked to the rotation: bright at the cardinals, deep at the
++    // diagonals; Pink shares Cyan's cadence, lagging 0.2 of a pulse cycle.
++    const float cyanT = 0.5f + 0.5f * cosf(2.0f * NVG_PI * (4.0f * rotFrac));
++    const float pinkT = 0.5f + 0.5f * cosf(2.0f * NVG_PI * (4.0f * rotFrac - 0.2f));
++
++    S2Wheel w;
++    w.rotFrac = rotFrac;
++    w.a[0]    = nvgRGB(0x00, 0x66, 0xFF); // Electric Blue
++    w.a[1]    = s2Lerp(nvgRGB(0xEE, 0xFF, 0xFF), nvgRGB(0xAA, 0xEE, 0xFF), cyanT); // Ice -> Aqua
++    w.a[2]    = nvgRGB(0x88, 0x77, 0xFF); // Periwinkle
++    w.a[3]    = s2Lerp(nvgRGB(0xFF, 0xDD, 0xDD), nvgRGB(0xFF, 0xBB, 0xBB), pinkT); // Soft -> Rose
++    return w;
++}
++
++// Colour of the sweep at perimeter position s in [0,1) (pre-rotation).
++static NVGcolor s2WheelColorAt(const S2Wheel& w, float s, float alpha)
++{
++    s -= w.rotFrac;
++    s -= floorf(s); // wrap to [0,1)
++    const float seg = s * 4.0f;
++    const int i     = (int)seg & 3;
++    const float f   = seg - floorf(seg);
++    NVGcolor c      = s2Lerp(w.a[(i + 3) & 3], w.a[i], f);
++    c.a             = alpha;
++    return c;
++}
++}
++
++// Draws the Switch 2 selection border: a "thickness"-wide ring around the
++// (x, y, width, height) box with the rotating wheel colours flowing along
++// the perimeter. Each side carries an equal quarter of the sweep (top
++// left->right, right top->bottom, bottom right->left, left bottom->top) and
++// the corner arcs are flat-coloured by the adjacent side's endpoint, so
++// every pixel column of a side shares one colour — matching the per-side
++// projection of the system UI reference.
++static void s2DrawWheelBorder(NVGcontext* vg, float x, float y, float width, float height, float thickness, float radius, float alpha)
++{
++    if (width <= 0.0f || height <= 0.0f || alpha <= 0.0f || thickness <= 0.0f)
++        return;
++
++    const S2Wheel wheel = s2MakeWheel();
++    radius = fminf(radius, fminf(width, height) / 2.0f);
++
++    // Centreline of the ring: a stroke of the given thickness centred on
++    // this path paints exactly the border box.
++    const float inset = thickness / 2.0f;
++    const float cl = x + inset, ct = y + inset;
++    const float cr = x + width - inset, cb = y + height - inset;
++    const float rr  = radius - inset;                        // centreline corner radius
++    const float clx = x + radius, crx = x + width - radius;  // corner centres
++    const float cty = y + radius, cby = y + height - radius;
++
++    nvgSave(vg);
++    nvgLineCap(vg, NVG_BUTT);
++    nvgStrokeWidth(vg, thickness);
++
++    auto strokeSpan = [&](float s0, float s1, float x0, float y0, float x1, float y1) {
++        nvgBeginPath(vg);
++        nvgMoveTo(vg, x0, y0);
++        nvgLineTo(vg, x1, y1);
++        nvgStrokePaint(vg, nvgLinearGradient(vg, x0, y0, x1, y1,
++            s2WheelColorAt(wheel, s0, alpha), s2WheelColorAt(wheel, s1, alpha)));
++        nvgStroke(vg);
++    };
++
++    // Straight sides. The colour along a side is piecewise linear with a
++    // breakpoint wherever a rotated wheel anchor (spacing 0.25 == the
++    // side's sweep) lands inside it, so each side splits at most once.
++    const struct
++    {
++        float a;
++        float x0, y0, x1, y1;
++    } sides[4] = {
++        { 0.00f, clx, ct, crx, ct },  // top:    left  -> right
++        { 0.25f, cr,  cty, cr, cby }, // right:  top   -> bottom
++        { 0.50f, crx, cb, clx, cb },  // bottom: right -> left
++        { 0.75f, cl,  cby, cl, cty }, // left:   bottom -> top
++    };
++
++    for (const auto& side : sides)
++    {
++        const float span = 0.25f;
++        const float b    = side.a + span;
++        float split      = -1.0f;
++        for (int k = 0; k < 4; k++)
++        {
++            const float p = fmodf(wheel.rotFrac + k * 0.25f, 1.0f);
++            if (p > side.a && p < b)
++            {
++                split = p;
++                break;
++            }
++        }
++
++        auto at = [&](float s, float& px, float& py) {
++            const float t = (s - side.a) / span;
++            px = side.x0 + (side.x1 - side.x0) * t;
++            py = side.y0 + (side.y1 - side.y0) * t;
++        };
++
++        float x0, y0, x1, y1, xm, ym;
++        if (split > 0.0f)
++        {
++            at(side.a, x0, y0);
++            at(split, xm, ym);
++            at(b, x1, y1);
++            strokeSpan(side.a, split, x0, y0, xm, ym);
++            strokeSpan(split, b, xm, ym, x1, y1);
++        }
++        else
++        {
++            at(side.a, x0, y0);
++            at(b, x1, y1);
++            strokeSpan(side.a, b, x0, y0, x1, y1);
++        }
++    }
++
++    // Corner arcs, flat-coloured by the adjacent side's endpoint.
++    if (rr > 0.0f)
++    {
++        const struct
++        {
++            float cx, cy, a0, a1, s;
++        } corners[4] = {
++            { clx, cty, NVG_PI, 1.5f * NVG_PI, 0.00f }, // top-left
++            { crx, cty, 1.5f * NVG_PI, 2.0f * NVG_PI, 0.25f }, // top-right
++            { crx, cby, 0.0f, 0.5f * NVG_PI, 0.50f }, // bottom-right
++            { clx, cby, 0.5f * NVG_PI, NVG_PI, 0.75f }, // bottom-left
++        };
++        for (const auto& c : corners)
++        {
++            nvgBeginPath(vg);
++            nvgArc(vg, c.cx, c.cy, rr, c.a0, c.a1, NVG_CW);
++            nvgStrokeColor(vg, s2WheelColorAt(wheel, c.s, alpha));
++            nvgStroke(vg);
++        }
++    }
++
++    nvgRestore(vg);
++}
++#endif // __SWITCH2__
++
+ namespace brls
+ {
+ 
+@@ -589,7 +757,11 @@ void View::drawHighlight(NVGcontext* vg, Theme theme, float alpha, Style style,
+     }
+     else
+     {
+-#ifdef SIMPLE_HIGHLIGHT
++#if defined(__SWITCH2__)
++        // Switch 2: rotating four-colour wheel border (system UI style),
++        // replacing the Switch 1 pulsing border and its glow entirely.
++        s2DrawWheelBorder(vg, x, y, width, height, strokeWidth, cornerRadius, alpha);
++#elif defined(SIMPLE_HIGHLIGHT)
+         // Border
+         nvgBeginPath(vg);
+         nvgStrokeColor(vg, a(theme["brls/highlight/color1"]));
 diff --git a/library/lib/platforms/switch/switch_input.cpp b/library/lib/platforms/switch/switch_input.cpp
 index b6ac3a82..a8c03659 100644
 --- a/library/lib/platforms/switch/switch_input.cpp
@@ -586,3 +801,110 @@ index b6ac3a82..a8c03659 100644
  }
  
  void SwitchInputManager::initCursor(NVGcontext* vg)
+diff --git a/library/lib/views/cells/cell_bool.cpp b/library/lib/views/cells/cell_bool.cpp
+index 080b9ebc..43ccd1d3 100644
+--- a/library/lib/views/cells/cell_bool.cpp
++++ b/library/lib/views/cells/cell_bool.cpp
+@@ -20,6 +20,40 @@
+ 
+ using namespace brls::literals;
+ 
++#ifdef __SWITCH2__
++// Switch 2 toggle: a 48x26 pill (on #0066EE / off #555555) with a white
++// knob, track colour and knob position driven by one eased parameter
++// (p in [0,1]), matching the system UI and the Ultrahand S2 reference.
++static void s2DrawToggle(NVGcontext* vg, float x, float y, float p, float alpha = 1.0f)
++{
++    if (p < 0.0f)
++        p = 0.0f;
++    else if (p > 1.0f)
++        p = 1.0f;
++
++    constexpr float TRACK_W = 48.0f;
++    constexpr float TRACK_H = 26.0f;
++    const float radius = TRACK_H / 2.0f;
++    const float knobR  = radius - 3.0f;
++
++    const NVGcolor on  = nvgRGB(0x00, 0x66, 0xEE);
++    const NVGcolor off = nvgRGB(0x55, 0x55, 0x55);
++    const NVGcolor track = nvgRGBAf(off.r + (on.r - off.r) * p, off.g + (on.g - off.g) * p,
++        off.b + (on.b - off.b) * p, alpha);
++
++    nvgBeginPath(vg);
++    nvgRoundedRect(vg, x, y, TRACK_W, TRACK_H, radius);
++    nvgFillColor(vg, track);
++    nvgFill(vg);
++
++    const float cx = x + radius + p * (TRACK_W - 2.0f * radius);
++    nvgBeginPath(vg);
++    nvgCircle(vg, cx, y + radius, knobR);
++    nvgFillColor(vg, nvgRGBAf(1.0f, 1.0f, 1.0f, alpha));
++    nvgFill(vg);
++}
++#endif
++
+ namespace brls
+ {
+ 
+@@ -45,6 +79,24 @@ void BooleanCell::setOn(bool on, bool animated)
+ {
+     this->state = on;
+ 
++#ifdef __SWITCH2__
++    // Switch 2 style: slide the pill toggle (150 ms, eased) instead of the
++    // Switch 1 ON/OFF text pulse. A rapid re-toggle reverses mid-travel.
++    if (animated)
++    {
++        float from = this->switchP;
++        this->switchP.stop();
++        this->switchP.reset(from);
++        this->switchP.addStep(state ? 1.0f : 0.0f, 150, tweeny::easing::quadraticInOut);
++        this->switchP.start();
++    }
++    else
++    {
++        this->switchP.stop();
++        this->switchP.reset(state ? 1.0f : 0.0f);
++    }
++    updateUI();
++#else
+     if (animated)
+     {
+         scale.stop();
+@@ -61,14 +113,36 @@ void BooleanCell::setOn(bool on, bool animated)
+     {
+         updateUI();
+     }
++#endif
+ }
+ 
+ void BooleanCell::updateUI()
+ {
++#ifdef __SWITCH2__
++    // Switch 2 style: the sliding pill replaces the ON/OFF text.
++    detail->setText("");
++#else
+     Theme theme = Application::getTheme();
+     detail->setText(state ? "hints/on"_i18n : "hints/off"_i18n);
+     detail->setTextColor(state ? theme["brls/list/listItem_value_color"] : theme["brls/text_disabled"]);
++#endif
++}
++
++#ifdef __SWITCH2__
++void BooleanCell::draw(NVGcontext* vg, float x, float y, float width, float height, Style style, FrameContext* ctx)
++{
++    DetailCell::draw(vg, x, y, width, height, style, ctx);
++
++    // Pill on the right, vertically centred, aligned to the detail label's
++    // right edge (where the ON/OFF text used to sit).
++    constexpr float TRACK_W = 48.0f;
++    constexpr float TRACK_H = 26.0f;
++    Rect detailFrame = this->detail->getFrame();
++    float px = detailFrame.getMaxX() - TRACK_W;
++    float py = y + (height - TRACK_H) / 2.0f;
++    s2DrawToggle(vg, px, py, this->switchP);
+ }
++#endif
+ 
+ void BooleanCell::scaleTick()
+ {
