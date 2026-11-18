@@ -203,10 +203,18 @@ index c7d67dcb..27c859eb 100644
                          hintParent->playClickAnimation();
  
 diff --git a/library/lib/core/theme.cpp b/library/lib/core/theme.cpp
-index aa63fa09..3d65a7a4 100644
+index aa63fa09..76faaf57 100644
 --- a/library/lib/core/theme.cpp
 +++ b/library/lib/core/theme.cpp
-@@ -83,8 +83,8 @@ static ThemeValues lightThemeValues = {
+@@ -31,6 +31,7 @@ static ThemeValues lightThemeValues = {
+     { "brls/backdrop", nvgRGBA(0, 0, 0, 178) },
+     { "brls/click_pulse", nvgRGBA(13, 182, 213, 38) }, // same as highlight color1 with different opacity
+     { "brls/accent", nvgRGB(49, 79, 235) },
++    { "brls/dialog/background", nvgRGB(235, 235, 235) },
+ 
+     // Highlight
+     { "brls/highlight/background", nvgRGB(252, 255, 248) },
+@@ -83,13 +84,14 @@ static ThemeValues lightThemeValues = {
  
  static ThemeValues darkThemeValues = {
      // Generic values
@@ -217,7 +225,14 @@ index aa63fa09..3d65a7a4 100644
      { "brls/text", nvgRGB(255, 255, 255) },
      { "brls/text_disabled", nvgRGB(80, 80, 80) },
      { "brls/backdrop", nvgRGBA(0, 0, 0, 178) },
-@@ -100,9 +100,9 @@ static ThemeValues darkThemeValues = {
+     { "brls/click_pulse", nvgRGBA(25, 138, 198, 38) }, // same as highlight color1 with different opacity
+-    { "brls/accent", nvgRGB(0, 255, 204) },
++    { "brls/accent", nvgRGB(32, 203, 255) },
++    { "brls/dialog/background", nvgRGB(58, 58, 58) },
+ 
+     // Highlight
+     { "brls/highlight/background", nvgRGB(31, 34, 39) },
+@@ -100,9 +102,9 @@ static ThemeValues darkThemeValues = {
      { "brls/applet_frame/separator", nvgRGB(255, 255, 255) },
  
      // Sidebar
@@ -229,7 +244,7 @@ index aa63fa09..3d65a7a4 100644
  
      // Header
      { "brls/header/border", nvgRGB(78, 78, 78) },
-@@ -127,7 +127,7 @@ static ThemeValues darkThemeValues = {
+@@ -127,7 +129,7 @@ static ThemeValues darkThemeValues = {
      { "brls/button/disabled_border_color", nvgRGB(255, 255, 255) },
  
      // List
@@ -1022,3 +1037,67 @@ index 080b9ebc..43ccd1d3 100644
  
  void BooleanCell::scaleTick()
  {
+diff --git a/library/lib/views/dialog.cpp b/library/lib/views/dialog.cpp
+index 33744bfe..bf218e4c 100644
+--- a/library/lib/views/dialog.cpp
++++ b/library/lib/views/dialog.cpp
+@@ -42,8 +42,8 @@ const std::string dialogXML = R"xml(
+             height="auto"
+             headerHidden="true"
+             footerHidden="true"
+-            cornerRadius="4"
+-            backgroundColor="@theme/brls/background">
++            cornerRadius="16"
++            backgroundColor="@theme/brls/dialog/background">
+ 
+             <brls:Box
+                 width="auto"
+@@ -73,7 +73,7 @@ const std::string dialogXML = R"xml(
+                     focusable="true"
+                     justifyContent="center"
+                     alignItems="center"
+-                    highlightCornerRadius="6"
++                    highlightCornerRadius="8"
+                     fontSize="@style/brls/dialog/fontSize"
+                     style="borderless"
+                     textColor="@theme/brls/accent"
+@@ -86,7 +86,7 @@ const std::string dialogXML = R"xml(
+                     axis="row"
+                     justifyContent="spaceEvenly"
+                     alignItems="stretch"
+-                    lineTop="2px"
++                    lineTop="1px"
+                     lineColor="@theme/brls/sidebar/separator"
+                     visibility="gone">
+ 
+@@ -98,7 +98,7 @@ const std::string dialogXML = R"xml(
+                         focusable="true"
+                         justifyContent="center"
+                         alignItems="center"
+-                        highlightCornerRadius="6"
++                        highlightCornerRadius="8"
+                         text="Continue"
+                         style="borderless"
+                         fontSize="@style/brls/dialog/fontSize"
+@@ -120,7 +120,7 @@ const std::string dialogXML = R"xml(
+                         focusable="true"
+                         justifyContent="center"
+                         alignItems="center"
+-                        highlightCornerRadius="6"
++                        highlightCornerRadius="8"
+                         text="Continue"
+                         style="borderless"
+                         fontSize="@style/brls/dialog/fontSize"
+diff --git a/library/lib/views/dropdown.cpp b/library/lib/views/dropdown.cpp
+index d32b3eb6..cbfd7202 100644
+--- a/library/lib/views/dropdown.cpp
++++ b/library/lib/views/dropdown.cpp
+@@ -40,7 +40,7 @@ const std::string dropdownFrameXML = R"xml(
+                 width="auto"
+                 height="330"
+                 axis="column"
+-                backgroundColor="@theme/brls/background">
++                backgroundColor="@theme/brls/dialog/background">
+ 
+                 <brls:Box
+                     id="brls/dropdown/header"
