@@ -198,7 +198,7 @@ static int viddec_h264_close(AVCodecContext *avctx)
 
 const FFCodec ff_h264_viddec_decoder = {
     .p.name = "h264_viddec",
-    CODEC_LONG_NAME("H.264 drako3d viddec"),
+    CODEC_LONG_NAME("H.264 NVIDIA T239 NVDEC"),
     .p.type = AVMEDIA_TYPE_VIDEO,
     .p.id = AV_CODEC_ID_H264,
     .priv_data_size = sizeof(ViddecH264Context),

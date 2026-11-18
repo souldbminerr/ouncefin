@@ -122,7 +122,7 @@ static int viddec_av1_close(AVCodecContext *avctx)
 
 const FFCodec ff_av1_viddec_decoder = {
     .p.name = "av1_viddec",
-    CODEC_LONG_NAME("AV1 drako3d viddec"),
+    CODEC_LONG_NAME("AV1 NVIDIA T239 NVDEC"),
     .p.type = AVMEDIA_TYPE_VIDEO,
     .p.id = AV_CODEC_ID_AV1,
     .priv_data_size = sizeof(ViddecAv1Context),

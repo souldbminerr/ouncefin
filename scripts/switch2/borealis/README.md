@@ -58,11 +58,18 @@ Behavior, all inside `library/.../switch/switch_input.{hpp,cpp}`:
 - Engagement requires real pointer travel (64 px net from the anchor)
   or wheel scroll — never a bare click, so resting fingers cannot
   phantom-click and a press on an idle pointer stays a pad press.
-- While in mouse mode, the mouse layer owns L/R/ZL/ZR (clicks) only for
-  1 s after its last use; idle in mouse mode hands the buttons back to
-  the pads (video seek) until the pointer moves again. Any controller
-  button press, touch, pointer loss, or 3 s without use ends mouse mode
-  and hides the cursor.
+- While mouse mode is on, L/R/ZL/ZR are pointer clicks for the whole
+  mode, never pad buttons, and any real use (net travel, scroll, click)
+  keeps the mode alive; 3 s without use ends it. Buttons the app bound
+  through `InputManager::setPadMouseBindings()` (e.g. the player's seek
+  keys) do not end mouse mode when pressed — they are mouse-mode input;
+  every other controller button, touch or pointer loss hands control
+  back to the pads. `InputManager::isPadMouseMode()` lets views bind
+  alternate actions for that state, and `isPadMouseBinding()` keeps core
+  input handling from dismissing those buttons' actions or flipping the
+  input type while the mode is on. Switchfin's player uses it for
+  X/DpadUp seek forward, DpadLeft/A seek back and Y/DpadRight for the
+  settings side menu, only in mouse mode.
 - The tap gesture treats right-click as the secondary tap and fires the
   view's `BUTTON_X` actions for it (touch taps stay `BUTTON_A`), so
   right-click works like the X button everywhere, including real USB

@@ -51,6 +51,15 @@ VideoView::VideoView() {
 
     this->input = brls::Application::getPlatform()->getInputManager();
 
+    // While the Joy-Con pointer is engaged (mouse mode), X/DpadUp seek
+    // forward, DpadLeft/A seek back, and Y/DpadRight open the settings
+    // side menu (normally on X); the click buttons stay with the pointer.
+    // Inert on platforms without pad mouse mode.
+    this->input->setPadMouseBindings({
+        brls::BUTTON_X, brls::BUTTON_NAV_UP, brls::BUTTON_NAV_LEFT, brls::BUTTON_A,
+        brls::BUTTON_Y, brls::BUTTON_NAV_RIGHT,
+    });
+
     this->registerAction(
         "hints/back"_i18n, brls::BUTTON_B,
         [this](brls::View* view) {
@@ -104,6 +113,12 @@ VideoView::VideoView() {
     this->registerActions(
         "main/player/setting"_i18n, brls::BUTTON_X, KeyBind::getSetting(),
         [this](brls::View* view) {
+            if (this->input->isPadMouseMode()) {
+                CHECK_OSD(true);
+                this->seekingRange += getSeekRange(this->seekingRange);
+                this->requestSeeking(seekingRange);
+                return true;
+            }
             CHECK_OSD(true);
             this->settingEvent.fire();
             return true;
@@ -113,6 +128,12 @@ VideoView::VideoView() {
     this->registerActions(
         "volumeUp", brls::BUTTON_NAV_UP, KeyBind::getVolumeUp(),
         [this](brls::View* view) -> bool {
+            if (this->input->isPadMouseMode()) {
+                CHECK_OSD(true);
+                this->seekingRange += getSeekRange(this->seekingRange);
+                this->requestSeeking(seekingRange);
+                return true;
+            }
             CHECK_OSD(true);
             auto& state = brls::Application::getControllerState();
             if (state.buttons[brls::BUTTON_RT]) {
@@ -305,6 +326,12 @@ VideoView::VideoView() {
 
     this->registerActions(
         "main/player/toggle"_i18n, brls::BUTTON_A, KeyBind::getVideoPause(), [this](brls::View* view) {
+            if (this->input->isPadMouseMode()) {
+                CHECK_OSD(true);
+                this->seekingRange -= getSeekRange(this->seekingRange);
+                this->requestSeeking(seekingRange);
+                return true;
+            }
             CHECK_OSD(true);
             MPVCore::instance().togglePlay();
             if (MPVCore::OSD_ON_TOGGLE) {
@@ -312,6 +339,32 @@ VideoView::VideoView() {
             }
             return true;
         });
+
+    this->registerAction(
+        "\uE08F", brls::BUTTON_NAV_LEFT,
+        [this](brls::View* view) -> bool {
+            if (this->input->isPadMouseMode()) {
+                CHECK_OSD(true);
+                this->seekingRange -= getSeekRange(this->seekingRange);
+                this->requestSeeking(seekingRange);
+                return true;
+            }
+            return false;
+        },
+        true, true);
+
+    // Mouse-mode-only: Y or DpadRight open the settings side menu (the
+    // normal X action, which seeks in mouse mode instead).
+    auto mouseModeSettings = [this](brls::View* view) -> bool {
+        if (this->input->isPadMouseMode()) {
+            CHECK_OSD(true);
+            this->settingEvent.fire();
+            return true;
+        }
+        return false;
+    };
+    this->registerAction("main/player/setting"_i18n, brls::BUTTON_Y, mouseModeSettings, true, true);
+    this->registerAction("main/player/setting"_i18n, brls::BUTTON_NAV_RIGHT, mouseModeSettings, true, true);
 
     /// 视频详情信息
     this->profile = new VideoProfile();
@@ -334,6 +387,7 @@ VideoView::~VideoView() {
     brls::Logger::debug("trying delete VideoView...");
     this->unRegisterMpvEvent();
     disableDimming(false);
+    this->input->setPadMouseBindings({});
 
     MPVCore::instance().stop();
 }

@@ -118,7 +118,7 @@ static int viddec_vp8_close(AVCodecContext *avctx)
 
 const FFCodec ff_vp8_viddec_decoder = {
     .p.name = "vp8_viddec",
-    CODEC_LONG_NAME("VP8 drako3d viddec"),
+    CODEC_LONG_NAME("VP8 NVIDIA T239 NVDEC"),
     .p.type = AVMEDIA_TYPE_VIDEO,
     .p.id = AV_CODEC_ID_VP8,
     .priv_data_size = sizeof(ViddecVp8Context),
