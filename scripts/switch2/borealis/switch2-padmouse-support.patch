@@ -202,6 +202,42 @@ index c7d67dcb..27c859eb 100644
                      if (type == ACTION_GAMEPAD && button == BUTTON_A)
                          hintParent->playClickAnimation();
  
+diff --git a/library/lib/core/theme.cpp b/library/lib/core/theme.cpp
+index aa63fa09..3d65a7a4 100644
+--- a/library/lib/core/theme.cpp
++++ b/library/lib/core/theme.cpp
+@@ -83,8 +83,8 @@ static ThemeValues lightThemeValues = {
+ 
+ static ThemeValues darkThemeValues = {
+     // Generic values
+-    { "brls/clear", nvgRGB(45, 45, 45) },
+-    { "brls/background", nvgRGB(45, 45, 45) },
++    { "brls/clear", nvgRGB(28, 28, 28) },
++    { "brls/background", nvgRGB(28, 28, 28) },
+     { "brls/text", nvgRGB(255, 255, 255) },
+     { "brls/text_disabled", nvgRGB(80, 80, 80) },
+     { "brls/backdrop", nvgRGBA(0, 0, 0, 178) },
+@@ -100,9 +100,9 @@ static ThemeValues darkThemeValues = {
+     { "brls/applet_frame/separator", nvgRGB(255, 255, 255) },
+ 
+     // Sidebar
+-    { "brls/sidebar/background", nvgRGB(50, 50, 50) },
++    { "brls/sidebar/background", nvgRGB(60, 60, 60) },
+     { "brls/sidebar/active_item", nvgRGB(0, 255, 204) },
+-    { "brls/sidebar/separator", nvgRGB(81, 81, 81) },
++    { "brls/sidebar/separator", nvgRGB(108, 108, 108) },
+ 
+     // Header
+     { "brls/header/border", nvgRGB(78, 78, 78) },
+@@ -127,7 +127,7 @@ static ThemeValues darkThemeValues = {
+     { "brls/button/disabled_border_color", nvgRGB(255, 255, 255) },
+ 
+     // List
+-    { "brls/list/listItem_value_color", nvgRGB(88, 195, 169) },
++    { "brls/list/listItem_value_color", nvgRGB(32, 203, 255) },
+ 
+     // Slider
+     { "brls/slider/pointer_color", nvgRGB(80, 80, 80) },
 diff --git a/library/lib/core/touch/tap_gesture.cpp b/library/lib/core/touch/tap_gesture.cpp
 index 31580135..2f4b8270 100644
 --- a/library/lib/core/touch/tap_gesture.cpp
@@ -255,10 +291,10 @@ index 31580135..2f4b8270 100644
  }
  
 diff --git a/library/lib/core/view.cpp b/library/lib/core/view.cpp
-index 13fb3520..5ec72850 100644
+index 13fb3520..301b5696 100644
 --- a/library/lib/core/view.cpp
 +++ b/library/lib/core/view.cpp
-@@ -43,6 +43,174 @@
+@@ -43,6 +43,240 @@
  
  using namespace brls::literals;
  
@@ -339,12 +375,19 @@ index 13fb3520..5ec72850 100644
 +    const float rr  = radius - inset;                        // centreline corner radius
 +    const float clx = x + radius, crx = x + width - radius;  // corner centres
 +    const float cty = y + radius, cby = y + height - radius;
++    // Straight spans between the corner centres; ~0 turns the shape into a
++    // pill (one axis) or a circle (both), where flat-coloured corners would
++    // break down and the sweep has to flow around the round ends.
++    const float spanW = crx - clx;
++    const float spanH = cby - cty;
 +
 +    nvgSave(vg);
 +    nvgLineCap(vg, NVG_BUTT);
 +    nvgStrokeWidth(vg, thickness);
 +
-+    auto strokeSpan = [&](float s0, float s1, float x0, float y0, float x1, float y1) {
++    // Strokes a straight span as a linear gradient between the wheel colours
++    // at its perimeter endpoints.
++    auto strokeLine = [&](float s0, float s1, float x0, float y0, float x1, float y1) {
 +        nvgBeginPath(vg);
 +        nvgMoveTo(vg, x0, y0);
 +        nvgLineTo(vg, x1, y1);
@@ -353,76 +396,135 @@ index 13fb3520..5ec72850 100644
 +        nvgStroke(vg);
 +    };
 +
-+    // Straight sides. The colour along a side is piecewise linear with a
-+    // breakpoint wherever a rotated wheel anchor (spacing 0.25 == the
-+    // side's sweep) lands inside it, so each side splits at most once.
-+    const struct
-+    {
-+        float a;
-+        float x0, y0, x1, y1;
-+    } sides[4] = {
-+        { 0.00f, clx, ct, crx, ct },  // top:    left  -> right
-+        { 0.25f, cr,  cty, cr, cby }, // right:  top   -> bottom
-+        { 0.50f, crx, cb, clx, cb },  // bottom: right -> left
-+        { 0.75f, cl,  cby, cl, cty }, // left:   bottom -> top
++    // Strokes an arc as a sweep from perimeter position s0 to s1, split into
++    // sub-arcs of at most 45 deg so a chord-axis linear gradient tracks the
++    // sweep closely (exact at the endpoints, ~7 % off mid-arc at most).
++    auto strokeArc = [&](float cx, float cy, float r, float a0, float a1, float s0, float s1) {
++        const float arc   = a1 - a0;
++        const int   steps = (int)ceilf(arc / (NVG_PI / 4.0f));
++        for (int i = 0; i < steps; i++)
++        {
++            const float b0 = a0 + arc * i / steps;
++            const float b1 = a0 + arc * (i + 1) / steps;
++            const float x0 = cx + r * cosf(b0), y0 = cy + r * sinf(b0);
++            const float x1 = cx + r * cosf(b1), y1 = cy + r * sinf(b1);
++            nvgBeginPath(vg);
++            nvgArc(vg, cx, cy, r, b0, b1, NVG_CW);
++            nvgStrokePaint(vg, nvgLinearGradient(vg, x0, y0, x1, y1,
++                s2WheelColorAt(wheel, s0 + (s1 - s0) * i / steps, alpha),
++                s2WheelColorAt(wheel, s0 + (s1 - s0) * (i + 1) / steps, alpha)));
++            nvgStroke(vg);
++        }
 +    };
 +
-+    for (const auto& side : sides)
++    if (spanW <= 0.5f && spanH <= 0.5f)
 +    {
-+        const float span = 0.25f;
-+        const float b    = side.a + span;
-+        float split      = -1.0f;
-+        for (int k = 0; k < 4; k++)
++        // Circle (round buttons): one continuous sweep around the ring,
++        // s = 0 at the upper-left diagonal (phi = 225 deg, the rect
++        // convention's phase), clockwise.
++        const float ccx = x + width / 2.0f, ccy = y + height / 2.0f;
++        for (int q = 0; q < 4; q++)
 +        {
-+            const float p = fmodf(wheel.rotFrac + k * 0.25f, 1.0f);
-+            if (p > side.a && p < b)
++            const float a0 = 3.0f * NVG_PI / 4.0f + q * NVG_PI / 2.0f;
++            strokeArc(ccx, ccy, rr, a0, a0 + NVG_PI / 2.0f, q * 0.25f, (q + 1) * 0.25f);
++        }
++    }
++    else if (spanW <= 0.5f)
++    {
++        // Vertical pill: the side bars carry the sweep on their share, the
++        // round caps sweep continuously between the seams.
++        const float ccx = (clx + crx) / 2.0f;
++        strokeLine(0.25f, 0.50f, cr, cty, cr, cby); // right: top -> bottom
++        strokeLine(0.75f, 1.00f, cl, cby, cl, cty); // left:  bottom -> top
++        strokeArc(ccx, cty, rr, NVG_PI, 2.0f * NVG_PI, 0.00f, 0.25f); // top cap
++        strokeArc(ccx, cby, rr, 0.0f, NVG_PI, 0.50f, 0.75f);          // bottom cap
++    }
++    else if (spanH <= 0.5f)
++    {
++        // Horizontal pill.
++        const float ccy = (cty + cby) / 2.0f;
++        strokeLine(0.00f, 0.25f, clx, ct, crx, ct); // top:    left  -> right
++        strokeLine(0.50f, 0.75f, crx, cb, clx, cb); // bottom: right -> left
++        strokeArc(crx, ccy, rr, -NVG_PI / 2.0f, NVG_PI / 2.0f, 0.25f, 0.50f);       // right cap
++        strokeArc(clx, ccy, rr, NVG_PI / 2.0f, 3.0f * NVG_PI / 2.0f, 0.75f, 1.00f); // left cap
++    }
++    else
++    {
++        // Rectangle: each side carries an equal quarter of the sweep (top
++        // left->right, right top->bottom, bottom right->left, left
++        // bottom->top) with a breakpoint wherever a rotated wheel anchor
++        // lands inside it (at most one, spacing 0.25 == the side's sweep),
++        // and the corner arcs are flat-coloured by the adjacent side's
++        // endpoint, so every pixel column of a side shares one colour —
++        // matching the per-side projection of the system UI reference.
++        const struct
++        {
++            float a;
++            float x0, y0, x1, y1;
++        } sides[4] = {
++            { 0.00f, clx, ct, crx, ct },  // top:    left  -> right
++            { 0.25f, cr,  cty, cr, cby }, // right:  top   -> bottom
++            { 0.50f, crx, cb, clx, cb },  // bottom: right -> left
++            { 0.75f, cl,  cby, cl, cty }, // left:   bottom -> top
++        };
++
++        for (const auto& side : sides)
++        {
++            const float span = 0.25f;
++            const float b    = side.a + span;
++            float split      = -1.0f;
++            for (int k = 0; k < 4; k++)
 +            {
-+                split = p;
-+                break;
++                const float p = fmodf(wheel.rotFrac + k * 0.25f, 1.0f);
++                if (p > side.a && p < b)
++                {
++                    split = p;
++                    break;
++                }
++            }
++
++            auto at = [&](float s, float& px, float& py) {
++                const float t = (s - side.a) / span;
++                px = side.x0 + (side.x1 - side.x0) * t;
++                py = side.y0 + (side.y1 - side.y0) * t;
++            };
++
++            float x0, y0, x1, y1, xm, ym;
++            if (split > 0.0f)
++            {
++                at(side.a, x0, y0);
++                at(split, xm, ym);
++                at(b, x1, y1);
++                strokeLine(side.a, split, x0, y0, xm, ym);
++                strokeLine(split, b, xm, ym, x1, y1);
++            }
++            else
++            {
++                at(side.a, x0, y0);
++                at(b, x1, y1);
++                strokeLine(side.a, b, x0, y0, x1, y1);
 +            }
 +        }
 +
-+        auto at = [&](float s, float& px, float& py) {
-+            const float t = (s - side.a) / span;
-+            px = side.x0 + (side.x1 - side.x0) * t;
-+            py = side.y0 + (side.y1 - side.y0) * t;
-+        };
-+
-+        float x0, y0, x1, y1, xm, ym;
-+        if (split > 0.0f)
++        // Corner arcs, flat-coloured by the adjacent side's endpoint.
++        if (rr > 0.0f)
 +        {
-+            at(side.a, x0, y0);
-+            at(split, xm, ym);
-+            at(b, x1, y1);
-+            strokeSpan(side.a, split, x0, y0, xm, ym);
-+            strokeSpan(split, b, xm, ym, x1, y1);
-+        }
-+        else
-+        {
-+            at(side.a, x0, y0);
-+            at(b, x1, y1);
-+            strokeSpan(side.a, b, x0, y0, x1, y1);
-+        }
-+    }
-+
-+    // Corner arcs, flat-coloured by the adjacent side's endpoint.
-+    if (rr > 0.0f)
-+    {
-+        const struct
-+        {
-+            float cx, cy, a0, a1, s;
-+        } corners[4] = {
-+            { clx, cty, NVG_PI, 1.5f * NVG_PI, 0.00f }, // top-left
-+            { crx, cty, 1.5f * NVG_PI, 2.0f * NVG_PI, 0.25f }, // top-right
-+            { crx, cby, 0.0f, 0.5f * NVG_PI, 0.50f }, // bottom-right
-+            { clx, cby, 0.5f * NVG_PI, NVG_PI, 0.75f }, // bottom-left
-+        };
-+        for (const auto& c : corners)
-+        {
-+            nvgBeginPath(vg);
-+            nvgArc(vg, c.cx, c.cy, rr, c.a0, c.a1, NVG_CW);
-+            nvgStrokeColor(vg, s2WheelColorAt(wheel, c.s, alpha));
-+            nvgStroke(vg);
++            const struct
++            {
++                float cx, cy, a0, a1, s;
++            } corners[4] = {
++                { clx, cty, NVG_PI, 1.5f * NVG_PI, 0.00f }, // top-left
++                { crx, cty, 1.5f * NVG_PI, 2.0f * NVG_PI, 0.25f }, // top-right
++                { crx, cby, 0.0f, 0.5f * NVG_PI, 0.50f }, // bottom-right
++                { clx, cby, 0.5f * NVG_PI, NVG_PI, 0.75f }, // bottom-left
++            };
++            for (const auto& c : corners)
++            {
++                nvgBeginPath(vg);
++                nvgArc(vg, c.cx, c.cy, rr, c.a0, c.a1, NVG_CW);
++                nvgStrokeColor(vg, s2WheelColorAt(wheel, c.s, alpha));
++                nvgStroke(vg);
++            }
 +        }
 +    }
 +
@@ -433,7 +535,7 @@ index 13fb3520..5ec72850 100644
  namespace brls
  {
  
-@@ -589,7 +757,11 @@ void View::drawHighlight(NVGcontext* vg, Theme theme, float alpha, Style style,
+@@ -589,7 +823,11 @@ void View::drawHighlight(NVGcontext* vg, Theme theme, float alpha, Style style,
      }
      else
      {
