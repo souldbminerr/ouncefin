@@ -291,10 +291,10 @@ index 31580135..2f4b8270 100644
  }
  
 diff --git a/library/lib/core/view.cpp b/library/lib/core/view.cpp
-index 13fb3520..301b5696 100644
+index 13fb3520..4f4cea7f 100644
 --- a/library/lib/core/view.cpp
 +++ b/library/lib/core/view.cpp
-@@ -43,6 +43,240 @@
+@@ -43,6 +43,252 @@
  
  using namespace brls::literals;
  
@@ -367,17 +367,16 @@ index 13fb3520..301b5696 100644
 +    const S2Wheel wheel = s2MakeWheel();
 +    radius = fminf(radius, fminf(width, height) / 2.0f);
 +
-+    // Centreline of the ring: a stroke of the given thickness centred on
-+    // this path paints exactly the border box.
-+    const float inset = thickness / 2.0f;
-+    const float cl = x + inset, ct = y + inset;
-+    const float cr = x + width - inset, cb = y + height - inset;
-+    const float rr  = radius - inset;                        // centreline corner radius
++    // Centreline of the ring: drawHighlight passes a box already expanded
++    // around the view by padding + strokeWidth/2, and the stroke is centred
++    // on this path — so the ring lies fully outside the view edge.
++    const float cl = x, ct = y;
++    const float cr = x + width, cb = y + height;
++    const float rr  = radius;                                // centreline corner radius
 +    const float clx = x + radius, crx = x + width - radius;  // corner centres
 +    const float cty = y + radius, cby = y + height - radius;
 +    // Straight spans between the corner centres; ~0 turns the shape into a
-+    // pill (one axis) or a circle (both), where flat-coloured corners would
-+    // break down and the sweep has to flow around the round ends.
++    // pill (one axis) or a circle (both).
 +    const float spanW = crx - clx;
 +    const float spanH = cby - cty;
 +
@@ -385,23 +384,40 @@ index 13fb3520..301b5696 100644
 +    nvgLineCap(vg, NVG_BUTT);
 +    nvgStrokeWidth(vg, thickness);
 +
-+    // Strokes a straight span as a linear gradient between the wheel colours
-+    // at its perimeter endpoints.
++    // Every segment is painted ~2 px past both of its ends (along the ring,
++    // colours clamped to its endpoint colours). The colour sweep is
++    // continuous along the ring, so each overlap is invisible — and since
++    // segments are drawn in ring order, the later one always covers the
++    // previous one's anti-aliased end edge. No butt-cap seams, and the
++    // strokes keep nanovg's smooth bezier arcs (no polygonised edges).
++    constexpr float OVERLAP = 2.0f;
++
++    // Straight span as a linear gradient between the wheel colours at its
++    // perimeter endpoints.
 +    auto strokeLine = [&](float s0, float s1, float x0, float y0, float x1, float y1) {
++        float dx = x1 - x0, dy = y1 - y0;
++        const float len = sqrtf(dx * dx + dy * dy);
++        if (len < 0.5f)
++            return;
++        dx *= OVERLAP / len;
++        dy *= OVERLAP / len;
 +        nvgBeginPath(vg);
-+        nvgMoveTo(vg, x0, y0);
-+        nvgLineTo(vg, x1, y1);
++        nvgMoveTo(vg, x0 - dx, y0 - dy);
++        nvgLineTo(vg, x1 + dx, y1 + dy);
 +        nvgStrokePaint(vg, nvgLinearGradient(vg, x0, y0, x1, y1,
 +            s2WheelColorAt(wheel, s0, alpha), s2WheelColorAt(wheel, s1, alpha)));
 +        nvgStroke(vg);
 +    };
 +
-+    // Strokes an arc as a sweep from perimeter position s0 to s1, split into
-+    // sub-arcs of at most 45 deg so a chord-axis linear gradient tracks the
-+    // sweep closely (exact at the endpoints, ~7 % off mid-arc at most).
++    // Clockwise arc (y-down) sweeping s0 -> s1, split into sub-arcs of at
++    // most 45 deg so a chord-axis linear gradient tracks the sweep closely
++    // (exact at the endpoints, ~7 % off mid-arc at most).
 +    auto strokeArc = [&](float cx, float cy, float r, float a0, float a1, float s0, float s1) {
++        if (r <= 0.0f)
++            return;
++        const float extA = OVERLAP / r;
 +        const float arc   = a1 - a0;
-+        const int   steps = (int)ceilf(arc / (NVG_PI / 4.0f));
++        const int   steps = (int)ceilf(fabsf(arc) / (NVG_PI / 4.0f));
 +        for (int i = 0; i < steps; i++)
 +        {
 +            const float b0 = a0 + arc * i / steps;
@@ -409,7 +425,7 @@ index 13fb3520..301b5696 100644
 +            const float x0 = cx + r * cosf(b0), y0 = cy + r * sinf(b0);
 +            const float x1 = cx + r * cosf(b1), y1 = cy + r * sinf(b1);
 +            nvgBeginPath(vg);
-+            nvgArc(vg, cx, cy, r, b0, b1, NVG_CW);
++            nvgArc(vg, cx, cy, r, b0 - extA, b1 + extA, NVG_CW);
 +            nvgStrokePaint(vg, nvgLinearGradient(vg, x0, y0, x1, y1,
 +                s2WheelColorAt(wheel, s0 + (s1 - s0) * i / steps, alpha),
 +                s2WheelColorAt(wheel, s0 + (s1 - s0) * (i + 1) / steps, alpha)));
@@ -423,29 +439,25 @@ index 13fb3520..301b5696 100644
 +        // s = 0 at the upper-left diagonal (phi = 225 deg, the rect
 +        // convention's phase), clockwise.
 +        const float ccx = x + width / 2.0f, ccy = y + height / 2.0f;
-+        for (int q = 0; q < 4; q++)
-+        {
-+            const float a0 = 3.0f * NVG_PI / 4.0f + q * NVG_PI / 2.0f;
-+            strokeArc(ccx, ccy, rr, a0, a0 + NVG_PI / 2.0f, q * 0.25f, (q + 1) * 0.25f);
-+        }
++        strokeArc(ccx, ccy, rr, 3.0f * NVG_PI / 4.0f, 3.0f * NVG_PI / 4.0f + 2.0f * NVG_PI, 0.0f, 1.0f);
 +    }
 +    else if (spanW <= 0.5f)
 +    {
 +        // Vertical pill: the side bars carry the sweep on their share, the
 +        // round caps sweep continuously between the seams.
 +        const float ccx = (clx + crx) / 2.0f;
-+        strokeLine(0.25f, 0.50f, cr, cty, cr, cby); // right: top -> bottom
-+        strokeLine(0.75f, 1.00f, cl, cby, cl, cty); // left:  bottom -> top
 +        strokeArc(ccx, cty, rr, NVG_PI, 2.0f * NVG_PI, 0.00f, 0.25f); // top cap
++        strokeLine(0.25f, 0.50f, cr, cty, cr, cby);                   // right: top -> bottom
 +        strokeArc(ccx, cby, rr, 0.0f, NVG_PI, 0.50f, 0.75f);          // bottom cap
++        strokeLine(0.75f, 1.00f, cl, cby, cl, cty);                   // left:  bottom -> top
 +    }
 +    else if (spanH <= 0.5f)
 +    {
 +        // Horizontal pill.
 +        const float ccy = (cty + cby) / 2.0f;
-+        strokeLine(0.00f, 0.25f, clx, ct, crx, ct); // top:    left  -> right
-+        strokeLine(0.50f, 0.75f, crx, cb, clx, cb); // bottom: right -> left
++        strokeLine(0.00f, 0.25f, clx, ct, crx, ct);                   // top:    left  -> right
 +        strokeArc(crx, ccy, rr, -NVG_PI / 2.0f, NVG_PI / 2.0f, 0.25f, 0.50f);       // right cap
++        strokeLine(0.50f, 0.75f, crx, cb, clx, cb);                   // bottom: right -> left
 +        strokeArc(clx, ccy, rr, NVG_PI / 2.0f, 3.0f * NVG_PI / 2.0f, 0.75f, 1.00f); // left cap
 +    }
 +    else
@@ -454,7 +466,7 @@ index 13fb3520..301b5696 100644
 +        // left->right, right top->bottom, bottom right->left, left
 +        // bottom->top) with a breakpoint wherever a rotated wheel anchor
 +        // lands inside it (at most one, spacing 0.25 == the side's sweep),
-+        // and the corner arcs are flat-coloured by the adjacent side's
++        // and the corners are flat-coloured by the adjacent side's
 +        // endpoint, so every pixel column of a side shares one colour —
 +        // matching the per-side projection of the system UI reference.
 +        const struct
@@ -521,7 +533,7 @@ index 13fb3520..301b5696 100644
 +            for (const auto& c : corners)
 +            {
 +                nvgBeginPath(vg);
-+                nvgArc(vg, c.cx, c.cy, rr, c.a0, c.a1, NVG_CW);
++                nvgArc(vg, c.cx, c.cy, rr, c.a0 - OVERLAP / rr, c.a1 + OVERLAP / rr, NVG_CW);
 +                nvgStrokeColor(vg, s2WheelColorAt(wheel, c.s, alpha));
 +                nvgStroke(vg);
 +            }
@@ -535,7 +547,7 @@ index 13fb3520..301b5696 100644
  namespace brls
  {
  
-@@ -589,7 +823,11 @@ void View::drawHighlight(NVGcontext* vg, Theme theme, float alpha, Style style,
+@@ -589,7 +835,11 @@ void View::drawHighlight(NVGcontext* vg, Theme theme, float alpha, Style style,
      }
      else
      {
