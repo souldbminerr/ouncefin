@@ -38,9 +38,16 @@
 #include <SDL2/SDL_main.h>
 #endif
 
+#if defined(__SWITCH2__)
+#include <switch.h>
+#endif
+
 using namespace brls::literals;  // for _i18n
 
 int main(int argc, char* argv[]) {
+#if defined(__SWITCH2__)
+    hidSetTouchScreenOutputRanges(1920, 1080);
+#endif
     std::vector<std::string> items;
     for (int i = 1; i < argc; i++) {
         if (std::strcmp(argv[i], "-d") == 0) {
