@@ -38,31 +38,29 @@ static int viddec_vp9_receive_frame(AVCodecContext *avctx, AVFrame *frame)
     ViddecVp9Context *ctx = avctx->priv_data;
     int ret;
 
+    /* Drain ready frame first (service returns images in order). */
     ret = viddec_poll(&ctx->be, avctx);
     if (ret < 0)
         return ret;
 
     if (!ctx->pending) {
-            AVPacket pkt = { 0 };
-            ret = ff_decode_get_packet(avctx, &pkt);
-            if (ret == AVERROR_EOF) {
-                if (ctx->inited && !ctx->be.eos_sent) {
-                    ret = viddec_submit(&ctx->be, NULL, 0, 0, 0, 1);
-                    if (ret == AVERROR(EAGAIN))
-                        return AVERROR(EAGAIN);
-                    if (ret < 0)
-                        return ret;
-                }
-                if (!ctx->inited || viddec_drained(&ctx->be))
-                    return AVERROR_EOF;
-                return AVERROR(EAGAIN);
+        AVPacket pkt = { 0 };
+        ret = ff_decode_get_packet(avctx, &pkt);
+        if (ret == AVERROR_EOF) {
+            if (ctx->inited && !ctx->be.eos_sent) {
+                ret = viddec_submit(&ctx->be, NULL, 0, 0,
+                                    AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0, 1);
+                if (ret < 0 && ret != AVERROR(EAGAIN))
+                    return ret;
             }
-            if (ret < 0)
-                return ret;
-            if (!pkt.size) {
-                av_packet_unref(&pkt);
-                return AVERROR(EAGAIN);
-            }
+            if (!ctx->inited || viddec_drained(&ctx->be))
+                return AVERROR_EOF;
+            /* Fall through to emit (may have ready frame). */
+        } else if (ret < 0) {
+            return ret;
+        } else if (!pkt.size) {
+            av_packet_unref(&pkt);
+        } else {
             if (!ctx->inited) {
 #ifdef __SWITCH2__
                 ret = viddec_create(&ctx->be, avctx, VIDDEC_CODEC_ID, 0, NULL, 0);
@@ -83,28 +81,39 @@ static int viddec_vp9_receive_frame(AVCodecContext *avctx, AVFrame *frame)
             }
             av_packet_move_ref(ctx->pending, &pkt);
         }
+    }
 
-        {
-            AVPacket *pkt = ctx->pending;
-            int64_t pts = (pkt->pts != AV_NOPTS_VALUE) ? pkt->pts
-                          : (pkt->dts != AV_NOPTS_VALUE) ? pkt->dts : 0;
-            ret = viddec_submit(&ctx->be, pkt->data, pkt->size, pts,
-                                !!(pkt->flags & AV_PKT_FLAG_KEY), 0);
-        }
-        if (ret == AVERROR(EAGAIN))
-            return AVERROR(EAGAIN);
-        if (ret < 0)
+    if (ctx->pending) {
+        AVPacket *pkt = ctx->pending;
+        int64_t pts = pkt->pts;
+        int64_t dts = pkt->dts;
+        int64_t eff = (pts != AV_NOPTS_VALUE) ? pts
+                      : (dts != AV_NOPTS_VALUE) ? dts : 0;
+        ret = viddec_submit(&ctx->be, pkt->data, pkt->size,
+                            viddec_pts_to_ns(avctx, eff),
+                            pts, dts,
+                            !!(pkt->flags & AV_PKT_FLAG_KEY), 0);
+        if (ret < 0 && ret != AVERROR(EAGAIN))
             return ret;
-        av_packet_free(&ctx->pending);
-        if (viddec_emit_one(&ctx->be, frame))
-            return 0;
-        return AVERROR(EAGAIN);
+        if (!ret) {
+            av_packet_free(&ctx->pending);
+            ctx->pending = NULL;
+        }
+    }
+
+    /* Always try emit (even after submit EAGAIN) to drain service. */
+    if (viddec_emit_one(&ctx->be, frame))
+        return 0;
+    if (viddec_drained(&ctx->be))
+        return AVERROR_EOF;
+    return AVERROR(EAGAIN);
 }
 
 static void viddec_vp9_flush(AVCodecContext *avctx)
 {
     ViddecVp9Context *ctx = avctx->priv_data;
     av_packet_free(&ctx->pending);
+    ctx->pending = NULL;
     viddec_flush(&ctx->be);
 }
 
@@ -112,6 +121,7 @@ static int viddec_vp9_close(AVCodecContext *avctx)
 {
     ViddecVp9Context *ctx = avctx->priv_data;
     av_packet_free(&ctx->pending);
+    ctx->pending = NULL;
     viddec_close(&ctx->be);
     return 0;
 }

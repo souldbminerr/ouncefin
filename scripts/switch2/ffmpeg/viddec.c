@@ -13,10 +13,6 @@
 #include "libavutil/mem.h"
 #include "decode.h"
 
-/* ---- Identity reporting ----
- * Exported (C linkage) so frontends can identify which viddec HW
- * decoder engine is active and how many frames it has emitted.
- * active_codec holds the ViddecCodec value, or -1 when none runs. */
 static int viddec_g_active_codec = -1;
 static unsigned long long viddec_g_frames_out;
 
@@ -47,6 +43,7 @@ int viddec_create(ViddecBackend *b, AVCodecContext *avctx, int codec,
     b->tiling_block = tiling_block;
     b->ts_head = 0;
     b->ts_count = 0;
+    b->ready = NULL;
     b->eos_sent = false;
     b->eos_done = false;
 
@@ -78,14 +75,33 @@ int viddec_create(ViddecBackend *b, AVCodecContext *avctx, int codec,
     viddec_g_active_codec = codec;
     /* New stream: restart the frame count for this engine. */
     viddec_g_frames_out = 0;
+    b->n_getframe_errs = 0;
     av_log(avctx, AV_LOG_INFO, "viddec: created codec=%d %dx%d %s\n",
            codec, cfg.width, cfg.height,
            tiling_block ? "block-linear" : "pitch-linear");
     return 0;
 }
 
+int64_t viddec_pts_to_ns(AVCodecContext *avctx, int64_t pts)
+{
+    AVRational tb = avctx->pkt_timebase;
+    if (tb.num <= 0 || tb.den <= 0)
+        tb = (AVRational){ 1, AV_TIME_BASE };
+    if (pts == AV_NOPTS_VALUE)
+        return 0;
+    return av_rescale_q(pts, tb, (AVRational){ 1, 1000000000 });
+}
+
+int64_t viddec_ns_to_pts(AVCodecContext *avctx, int64_t ns)
+{
+    AVRational tb = avctx->pkt_timebase;
+    if (tb.num <= 0 || tb.den <= 0)
+        tb = (AVRational){ 1, AV_TIME_BASE };
+    return av_rescale_q(ns, (AVRational){ 1, 1000000000 }, tb);
+}
+
 int viddec_submit(ViddecBackend *b, const uint8_t *data, size_t size,
-                  int64_t pts, int is_key, int eos)
+                  int64_t pts_ns, int64_t pts, int64_t dts, int is_key, int eos)
 {
     Result rc;
 
@@ -96,24 +112,24 @@ int viddec_submit(ViddecBackend *b, const uint8_t *data, size_t size,
         return AVERROR_EOF;
 
     if (!eos) {
+        ViddecTsEntry e = { pts_ns, pts, dts, is_key };
         if (b->ts_count < VIDDEC_FIFO_SIZE) {
             int idx = (b->ts_head + b->ts_count) % VIDDEC_FIFO_SIZE;
-            b->ts_fifo[idx] = pts;
-            b->ts_key[idx] = is_key;
+            b->ts_fifo[idx] = e;
             b->ts_count++;
         } else {
-            b->ts_fifo[b->ts_head] = pts;
-            b->ts_key[b->ts_head] = is_key;
+            b->ts_fifo[b->ts_head] = e;
             b->ts_head = (b->ts_head + 1) % VIDDEC_FIFO_SIZE;
         }
     }
 
-    rc = videoDecoderSubmit(&b->dec, data, size, (s64)pts,
+    rc = videoDecoderSubmit(&b->dec, data, size, (s64)pts_ns,
                             eos ? true : false, 0);
     if (R_FAILED(rc)) {
         if (rc == KERNELRESULT(TimedOut)) {
-            if (!eos && b->ts_count > 0)
+            if (!eos && b->ts_count > 0) {
                 b->ts_count--;
+            }
             b->n_eagain++;
             if (!b->eagain_since)
                 b->eagain_since = av_gettime();
@@ -136,76 +152,33 @@ int viddec_submit(ViddecBackend *b, const uint8_t *data, size_t size,
     return 0;
 }
 
-static int viddec_match_ts(ViddecBackend *b, int64_t ts)
+static int viddec_match_entry(ViddecBackend *b, int64_t echo_ns, ViddecTsEntry *out)
 {
+    int best = -1;
+    int64_t best_d = 1001; /* tolerance: service truncates ns->us */
     for (int i = 0; i < b->ts_count; i++) {
         int idx = (b->ts_head + i) % VIDDEC_FIFO_SIZE;
-        if (b->ts_fifo[idx] == ts) {
-            int key = b->ts_key[idx];
-            /* Remove by shifting tail. */
-            for (int j = i; j < b->ts_count - 1; j++) {
-                int a = (b->ts_head + j) % VIDDEC_FIFO_SIZE;
-                int c = (b->ts_head + j + 1) % VIDDEC_FIFO_SIZE;
-                b->ts_fifo[a] = b->ts_fifo[c];
-                b->ts_key[a] = b->ts_key[c];
-            }
-            b->ts_count--;
-            return key;
+        int64_t d = b->ts_fifo[idx].ns - echo_ns;
+        if (d < 0)
+            d = -d;
+        if (d <= 1000 && d < best_d) {
+            best_d = d;
+            best = i;
         }
     }
-    return 0;
-}
-
-static void viddec_rq_insert(ViddecBackend *b, AVFrame *f, int64_t now_us)
-{
-    if (b->rq_len >= b->rq_cap) {
-        int ncap = b->rq_cap ? b->rq_cap * 2 : 8;
-        AVFrame **nrq = av_realloc_array(b->rq, ncap, sizeof(*nrq));
-        int64_t *nin = av_realloc_array(b->rq_in_us, ncap, sizeof(*nin));
-        if (!nrq || !nin) {
-            av_freep(&nrq);
-            av_freep(&nin);
-            av_frame_free(&f);
-            return;
-        }
-        b->rq = nrq;
-        b->rq_in_us = nin;
-        b->rq_cap = ncap;
-    }
-    {
-        int i = b->rq_len;
-        while (i > 0 && b->rq[i - 1]->pts > f->pts) {
-            b->rq[i] = b->rq[i - 1];
-            b->rq_in_us[i] = b->rq_in_us[i - 1];
-            i--;
-        }
-        b->rq[i] = f;
-        b->rq_in_us[i] = now_us;
-        b->rq_len++;
-    }
-}
-
-static int viddec_rq_emit_lowest(ViddecBackend *b, AVFrame *out)
-{
-    AVFrame *f;
-    if (!b->rq_len)
+    if (best < 0)
         return 0;
-    f = b->rq[0];
-    memmove(&b->rq[0], &b->rq[1], (size_t)(b->rq_len - 1) * sizeof(*b->rq));
-    memmove(&b->rq_in_us[0], &b->rq_in_us[1],
-            (size_t)(b->rq_len - 1) * sizeof(*b->rq_in_us));
-    b->rq_len--;
-    av_frame_move_ref(out, f);
-    av_frame_free(&f);
-    viddec_g_frames_out++;
-    return 1;
-}
-
-static void viddec_rq_clear(ViddecBackend *b)
-{
-    while (b->rq_len > 0) {
-        AVFrame *f = b->rq[--b->rq_len];
-        av_frame_free(&f);
+    {
+        int idx = (b->ts_head + best) % VIDDEC_FIFO_SIZE;
+        *out = b->ts_fifo[idx];
+        /* Remove by shifting tail. */
+        for (int j = best; j < b->ts_count - 1; j++) {
+            int a = (b->ts_head + j) % VIDDEC_FIFO_SIZE;
+            int c = (b->ts_head + j + 1) % VIDDEC_FIFO_SIZE;
+            b->ts_fifo[a] = b->ts_fifo[c];
+        }
+        b->ts_count--;
+        return 1;
     }
 }
 
@@ -216,27 +189,50 @@ static int viddec_fetch(ViddecBackend *b, AVCodecContext *avctx, AVFrame **out)
     AVFrame *frame;
     int ret;
     uint32_t copy_w, copy_h;
+    ViddecTsEntry ts = { 0, AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0 };
+    int have_ts = 0;
 
     *out = NULL;
     rc = videoDecoderGetFrame(&b->dec, &vf, 0);
     if (R_FAILED(rc)) {
         if (rc == KERNELRESULT(TimedOut))
             return 0; /* No frame ready yet */
-        av_log(avctx, AV_LOG_ERROR, "viddec: GetFrame failed: 0x%x\n", (unsigned)rc);
-        return AVERROR_EXTERNAL;
+        if (b->in_flight > 0)
+            b->in_flight--;
+        b->n_getframe_errs++;
+        av_log(avctx, b->n_getframe_errs >= VIDDEC_MAX_GETFRAME_ERRORS
+                          ? AV_LOG_ERROR : AV_LOG_VERBOSE,
+               "viddec: GetFrame failed: 0x%x (consecutive %d)\n",
+               (unsigned)rc, b->n_getframe_errs);
+        if (b->n_getframe_errs >= VIDDEC_MAX_GETFRAME_ERRORS)
+            return AVERROR_EXTERNAL;
+        return 0;
     }
+    b->n_getframe_errs = 0;
 
     if (b->in_flight > 0)
         b->in_flight--;
     b->eagain_since = 0;
+
+    have_ts = viddec_match_entry(b, (int64_t)vf.timestamp_ns, &ts);
 
     frame = av_frame_alloc();
     if (!frame) {
         videoDecoderReleaseFrame(&b->dec, &vf);
         return AVERROR(ENOMEM);
     }
-    frame->pts = (int64_t)vf.timestamp_ns;
-    frame->pkt_dts = frame->pts;
+    if (have_ts) {
+        frame->pts = ts.pts;
+        frame->pkt_dts = ts.pts;
+    } else if (vf.end_of_stream) {
+        frame->pts = viddec_ns_to_pts(avctx, (int64_t)vf.timestamp_ns);
+        frame->pkt_dts = frame->pts;
+    } else {
+        videoDecoderReleaseFrame(&b->dec, &vf);
+        av_frame_free(&frame);
+        b->n_empty++;
+        return 0;
+    }
     if (vf.end_of_stream)
         b->eos_done = true;
 
@@ -305,7 +301,7 @@ static int viddec_fetch(ViddecBackend *b, AVCodecContext *avctx, AVFrame **out)
                    frame->width);
     }
 
-    if (viddec_match_ts(b, (int64_t)vf.timestamp_ns))
+    if (have_ts ? ts.is_key : 0)
         frame->flags |= AV_FRAME_FLAG_KEY;
     frame->pict_type = (frame->flags & AV_FRAME_FLAG_KEY) ? AV_PICTURE_TYPE_I
                                                           : AV_PICTURE_TYPE_NONE;
@@ -329,47 +325,35 @@ int viddec_poll(ViddecBackend *b, AVCodecContext *avctx)
 
     if (!b->created)
         return 0; /* Not initialized yet */
+    if (b->ready)
+        return 1; /* Already have one ready (single slot, service ordered) */
 
     ret = viddec_fetch(b, avctx, &f);
     if (ret < 0)
         return ret;
     if (ret == 0)
         return 0;
-    if (b->in_flight > 0)
-        b->in_flight--;
-    viddec_rq_insert(b, f, av_gettime());
+    b->ready = f;
     return 1;
 }
 
 int viddec_emit_one(ViddecBackend *b, AVFrame *out)
 {
-    for (;;) {
-        AVFrame *head;
-        if (!b->rq_len)
-            return 0;
-        head = b->rq[0];
-        if (b->have_out && head->pts <= b->last_out_pts) {
-            av_frame_free(&b->rq[0]);
-            memmove(&b->rq[0], &b->rq[1],
-                    (size_t)(b->rq_len - 1) * sizeof(*b->rq));
-            memmove(&b->rq_in_us[0], &b->rq_in_us[1],
-                    (size_t)(b->rq_len - 1) * sizeof(*b->rq_in_us));
-            b->rq_len--;
-            continue;
-        }
-
-        if (b->rq_len <= VIDDEC_REORDER_DEPTH && !b->eos_done &&
-            av_gettime() - b->rq_in_us[0] <= VIDDEC_EMIT_TIMEOUT_US)
-            return 0;
-        b->last_out_pts = head->pts;
-        b->have_out = 1;
-        return viddec_rq_emit_lowest(b, out);
-    }
+    AVFrame *f;
+    if (!b->ready)
+        return 0;
+    f = b->ready;
+    b->ready = NULL;
+    av_frame_move_ref(out, f);
+    av_frame_free(&f);
+    b->n_emit++;
+    viddec_g_frames_out++;
+    return 1;
 }
 
 int viddec_drained(ViddecBackend *b)
 {
-    return b->eos_done && b->rq_len == 0;
+    return b->eos_done && !b->ready;
 }
 
 void viddec_flush(ViddecBackend *b)
@@ -377,11 +361,11 @@ void viddec_flush(ViddecBackend *b)
     if (!b->created)
         return;
     videoDecoderFlush(&b->dec);
-    viddec_rq_clear(b);
+    av_frame_free(&b->ready);
+    b->ready = NULL;
     b->in_flight = 0;
     b->eagain_since = 0;
-    b->have_out = 0;
-    b->last_out_pts = 0;
+    b->n_getframe_errs = 0;
     b->ts_head = 0;
     b->ts_count = 0;
     b->eos_sent = false;
@@ -395,10 +379,8 @@ void viddec_close(ViddecBackend *b)
         b->created = false;
         viddec_g_active_codec = -1;
     }
-    viddec_rq_clear(b);
-    av_freep(&b->rq);
-    av_freep(&b->rq_in_us);
-    b->rq_cap = 0;
+    av_frame_free(&b->ready);
+    b->ready = NULL;
     b->in_flight = 0;
     av_freep(&b->conv_buf);
     b->conv_size = 0;
@@ -406,7 +388,7 @@ void viddec_close(ViddecBackend *b)
     b->ts_count = 0;
 }
 
-/* ---- H.264 helpers ---- */
+/* ---- H.264 helpers (S1-style robust NAL handling) ---- */
 
 int viddec_is_annexb(const uint8_t *data, size_t size)
 {
@@ -498,10 +480,14 @@ int viddec_h264_config_from_avcc(const uint8_t *extradata, size_t extradata_size
 int viddec_h264_config_from_annexb(const uint8_t *data, size_t size,
                                    uint8_t **out, size_t *out_size)
 {
-    /* Find all NAL boundaries. */
+    const uint8_t *sps = NULL, *pps = NULL;
+    size_t sps_len = 0, pps_len = 0;
+    uint8_t *dst;
+    static const uint8_t sc[4] = { 0, 0, 0, 1 };
+    size_t i = 0;
+    /* Find all NAL boundaries (S1 parser splits NALs; we scan robustly). */
     size_t caps[64][2];
     int nals = 0;
-    size_t i = 0;
 
     while (i + 3 < size && nals < 64) {
         size_t sc_len = 0;
@@ -533,74 +519,143 @@ int viddec_h264_config_from_annexb(const uint8_t *data, size_t size,
         }
     }
 
-    {
-        const uint8_t *sps = NULL, *pps = NULL;
-        size_t sps_len = 0, pps_len = 0;
-        uint8_t *dst;
-        static const uint8_t sc[4] = { 0, 0, 0, 1 };
-
-        for (i = 0; (size_t)i < (size_t)nals; i++) {
-            const uint8_t *nal = data + caps[i][0];
-            size_t len = caps[i][1] - caps[i][0];
-            size_t hdr = (nal[2] == 1) ? 3 : 4;
-            int type;
-            if (len <= hdr)
-                continue;
-            type = nal[hdr] & 31;
-            if (type == 7 && !sps) {
-                sps = nal;
-                sps_len = len;
-            } else if (type == 8 && !pps) {
-                pps = nal;
-                pps_len = len;
-            }
-            if (sps && pps)
-                break;
+    for (i = 0; (size_t)i < (size_t)nals; i++) {
+        const uint8_t *nal = data + caps[i][0];
+        size_t len = caps[i][1] - caps[i][0];
+        size_t hdr = (nal[2] == 1) ? 3 : 4;
+        int type;
+        if (len <= hdr)
+            continue;
+        type = nal[hdr] & 31;
+        if (type == 7 && !sps) {
+            sps = nal;
+            sps_len = len;
+        } else if (type == 8 && !pps) {
+            pps = nal;
+            pps_len = len;
         }
-        if (!sps || !pps)
-            return AVERROR_INVALIDDATA;
-        dst = av_malloc(sps_len + pps_len + 8);
-        if (!dst)
-            return AVERROR(ENOMEM);
-        *out_size = 0;
-        if (sps[2] == 1) { /* 3-byte start code: normalize to 4-byte */
-            memcpy(dst, sc, 4);
-            *out_size += 4;
-            memcpy(dst + *out_size, sps + 3, sps_len - 3);
-            *out_size += sps_len - 3;
-        } else {
-            memcpy(dst, sps, sps_len);
-            *out_size += sps_len;
-        }
-        if (pps[2] == 1) {
-            memcpy(dst + *out_size, sc, 4);
-            *out_size += 4;
-            memcpy(dst + *out_size, pps + 3, pps_len - 3);
-            *out_size += pps_len - 3;
-        } else {
-            memcpy(dst + *out_size, pps, pps_len);
-            *out_size += pps_len;
-        }
-        *out = dst;
-        return 0;
+        if (sps && pps)
+            break;
     }
+    if (!sps || !pps)
+        return AVERROR_INVALIDDATA;
+    dst = av_malloc(sps_len + pps_len + 8);
+    if (!dst)
+        return AVERROR(ENOMEM);
+    *out_size = 0;
+    if (sps[2] == 1) { /* 3-byte start code: normalize to 4-byte */
+        memcpy(dst, sc, 4);
+        *out_size += 4;
+        memcpy(dst + *out_size, sps + 3, sps_len - 3);
+        *out_size += sps_len - 3;
+    } else {
+        memcpy(dst, sps, sps_len);
+        *out_size += sps_len;
+    }
+    if (pps[2] == 1) {
+        memcpy(dst + *out_size, sc, 4);
+        *out_size += 4;
+        memcpy(dst + *out_size, pps + 3, pps_len - 3);
+        *out_size += pps_len - 3;
+    } else {
+        memcpy(dst + *out_size, pps, pps_len);
+        *out_size += pps_len;
+    }
+    *out = dst;
+    return 0;
 }
 
-/* Length-prefixed avcC packet -> Annex-B (4-byte start codes). */
-int viddec_avcc_to_annexb(const uint8_t *src, size_t src_size,
-                           uint8_t **dst, size_t *dst_cap)
+/* Extract first SPS/PPS pointers (without copying) for change detection. */
+int viddec_h264_extract_sps_pps(const uint8_t *data, size_t size,
+                                const uint8_t **out_sps, size_t *out_sps_len,
+                                const uint8_t **out_pps, size_t *out_pps_len)
 {
-    size_t need = 0, pos = 0, out = 0;
+    size_t i = 0;
+    const uint8_t *sps = NULL, *pps = NULL;
+    size_t sps_len = 0, pps_len = 0;
+    size_t caps[64][2];
+    int nals = 0;
+
+    *out_sps = NULL; *out_sps_len = 0;
+    *out_pps = NULL; *out_pps_len = 0;
+
+    while (i + 3 < size && nals < 64) {
+        size_t sc_len = 0;
+        if (data[i] == 0 && data[i + 1] == 0) {
+            if (data[i + 2] == 1)
+                sc_len = 3;
+            else if (i + 3 < size && data[i + 2] == 0 && data[i + 3] == 1)
+                sc_len = 4;
+        }
+        if (sc_len) {
+            size_t start = i + sc_len;
+            size_t end = start;
+            while (end + 2 < size) {
+                if (data[end] == 0 && data[end + 1] == 0 &&
+                    (data[end + 2] == 1 ||
+                     (end + 3 < size && data[end + 2] == 0 &&
+                      data[end + 3] == 1)))
+                    break;
+                end++;
+            }
+            if (start < size && end > start) {
+                caps[nals][0] = i;
+                caps[nals][1] = end;
+                nals++;
+            }
+            i = end;
+        } else {
+            i++;
+        }
+    }
+    for (i = 0; (size_t)i < (size_t)nals; i++) {
+        const uint8_t *nal = data + caps[i][0];
+        size_t len = caps[i][1] - caps[i][0];
+        size_t hdr = (nal[2] == 1) ? 3 : 4;
+        int type;
+        if (len <= hdr)
+            continue;
+        type = nal[hdr] & 31;
+        if (type == 7 && !sps) {
+            /* strip start code for comparison */
+            sps = nal + hdr;
+            sps_len = len - hdr;
+        } else if (type == 8 && !pps) {
+            pps = nal + hdr;
+            pps_len = len - hdr;
+        }
+        if (sps && pps)
+            break;
+    }
+    if (!sps || !pps)
+        return AVERROR_INVALIDDATA;
+    *out_sps = sps; *out_sps_len = sps_len;
+    *out_pps = pps; *out_pps_len = pps_len;
+    return 0;
+}
+
+int viddec_avcc_to_annexb(const uint8_t *src, size_t src_size,
+                           uint8_t **dst, size_t *dst_cap, int nal_len_size)
+{
+    size_t need = 0, out = 0;
     const uint8_t *p = src;
     const uint8_t *end = src + src_size;
     uint8_t *buf = *dst;
     static const uint8_t sc[4] = { 0, 0, 0, 1 };
 
-    while (p + 4 <= end) {
-        uint32_t n = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
-                     ((uint32_t)p[2] << 8) | (uint32_t)p[3];
-        p += 4;
-        if (n == 0 || p + n > end)
+    if (nal_len_size != 1 && nal_len_size != 2 && nal_len_size != 4)
+        return AVERROR_INVALIDDATA;
+
+    while (p + nal_len_size <= end) {
+        uint32_t n = 0;
+        for (int k = 0; k < nal_len_size; k++)
+            n = (n << 8) | p[k];
+        p += nal_len_size;
+        if (n == 0) {
+            /* Skip empty NAL (robustness, S1 parser would skip). */
+            continue;
+        }
+        if (p + n > end)
             return AVERROR_INVALIDDATA;
         need += 4 + n;
         p += n;
@@ -619,16 +674,18 @@ int viddec_avcc_to_annexb(const uint8_t *src, size_t src_size,
         *dst_cap = need;
     }
     p = src;
-    while (p + 4 <= end) {
-        uint32_t n = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
-                     ((uint32_t)p[2] << 8) | (uint32_t)p[3];
-        p += 4;
+    while (p + nal_len_size <= end) {
+        uint32_t n = 0;
+        for (int k = 0; k < nal_len_size; k++)
+            n = (n << 8) | p[k];
+        p += nal_len_size;
+        if (n == 0)
+            continue;
         memcpy(buf + out, sc, 4);
         out += 4;
         memcpy(buf + out, p, n);
         out += n;
         p += n;
-        (void)pos;
     }
     return (int)out;
 }
@@ -644,18 +701,25 @@ int viddec_create(ViddecBackend *b, AVCodecContext *avctx, int codec,
     return AVERROR(ENOSYS);
 }
 int viddec_submit(ViddecBackend *b, const uint8_t *data, size_t size,
-                  int64_t pts, int is_key, int eos)
+                  int64_t pts_ns, int64_t pts, int64_t dts, int is_key, int eos)
 {
-    (void)b; (void)data; (void)size; (void)pts; (void)is_key; (void)eos;
+    (void)b; (void)data; (void)size; (void)pts_ns; (void)pts; (void)dts;
+    (void)is_key; (void)eos;
     return AVERROR(ENOSYS);
 }
-int viddec_receive(ViddecBackend *b, AVCodecContext *avctx, AVFrame *frame)
+int viddec_poll(ViddecBackend *b, AVCodecContext *avctx)
 {
-    (void)b; (void)avctx; (void)frame;
+    (void)b; (void)avctx;
     return AVERROR(ENOSYS);
+}
+int viddec_emit_one(ViddecBackend *b, AVFrame *out)
+{
+    (void)b; (void)out;
+    return 0;
 }
 void viddec_flush(ViddecBackend *b) { (void)b; }
 void viddec_close(ViddecBackend *b) { (void)b; }
+int viddec_drained(ViddecBackend *b) { (void)b; return 1; }
 int viddec_h264_config_from_avcc(const uint8_t *e, size_t n, uint8_t **o, size_t *s)
 {
     (void)e; (void)n; (void)o; (void)s;
@@ -666,15 +730,22 @@ int viddec_h264_config_from_annexb(const uint8_t *d, size_t n, uint8_t **o, size
     (void)d; (void)n; (void)o; (void)s;
     return AVERROR(ENOSYS);
 }
-int viddec_avcc_to_annexb(const uint8_t *s, size_t n, uint8_t **d, size_t *c)
+int viddec_avcc_to_annexb(const uint8_t *s, size_t n, uint8_t **d, size_t *c, int l)
 {
-    (void)s; (void)n; (void)d; (void)c;
+    (void)s; (void)n; (void)d; (void)c; (void)l;
     return AVERROR(ENOSYS);
 }
 int viddec_is_annexb(const uint8_t *d, size_t n)
 {
     (void)d; (void)n;
     return 0;
+}
+int viddec_h264_extract_sps_pps(const uint8_t *d, size_t n,
+                                const uint8_t **s, size_t *sl,
+                                const uint8_t **p, size_t *pl)
+{
+    (void)d; (void)n; (void)s; (void)sl; (void)p; (void)pl;
+    return AVERROR(ENOSYS);
 }
 
 #endif /* __SWITCH2__ */

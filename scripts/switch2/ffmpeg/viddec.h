@@ -21,7 +21,20 @@ typedef struct { int dummy; } VideoDecoder;
 typedef struct { int dummy; } VideoFrame;
 #endif
 
-#define VIDDEC_FIFO_SIZE 32
+#define VIDDEC_FIFO_SIZE 128
+/* Consecutive failed images before the decoder is considered wedged. */
+#define VIDDEC_MAX_GETFRAME_ERRORS 16
+
+/* Packet timebase <-> the service's nanosecond timestamps (viddec.c). */
+int64_t viddec_pts_to_ns(AVCodecContext *avctx, int64_t pts);
+int64_t viddec_ns_to_pts(AVCodecContext *avctx, int64_t ns);
+
+typedef struct ViddecTsEntry {
+    int64_t ns;    /* submitted service timestamp */
+    int64_t pts;   /* original packet pts (may be NOPTS) */
+    int64_t dts;   /* original packet dts (may be NOPTS) */
+    int is_key;
+} ViddecTsEntry;
 
 typedef struct ViddecBackend {
     VideoDecoder dec;
@@ -30,36 +43,32 @@ typedef struct ViddecBackend {
     bool eos_done;
     int codec;              /* ViddecCodec value  */
     int tiling_block;       /* 1: block-linear (AV1), 0: pitch-linear */
-    int64_t ts_fifo[VIDDEC_FIFO_SIZE];
-    int ts_key[VIDDEC_FIFO_SIZE];
+
+    /* Submit-order FIFO for timestamp/key mapping. Matched out of order
+     * (service outputs in presentation order). */
+    ViddecTsEntry ts_fifo[VIDDEC_FIFO_SIZE];
     int ts_head, ts_count;
 
-    AVFrame **rq;
-    int64_t *rq_in_us; /* arrival time per slot, for the emit timeout */
-    int rq_len, rq_cap;
-
-    int64_t last_out_pts;
-    int have_out;
+    /* Single ready frame (service already returns images in order, so no
+     * pts-sorted reorder queue like before). */
+    AVFrame *ready;
 
     int in_flight;
 
     int64_t eagain_since;
 
     uint64_t n_submit, n_emit, n_eagain, n_empty, n_eos;
-    int rq_max;
+    int n_getframe_errs;    /* consecutive GetFrame errors (skipped images) */
 
     uint8_t *conv_buf;
     size_t conv_size;
 } ViddecBackend;
 
-#define VIDDEC_REORDER_DEPTH 4
-#define VIDDEC_EMIT_TIMEOUT_US 150000
-
 int viddec_create(ViddecBackend *b, AVCodecContext *avctx, int codec,
                   int tiling_block, const void *codec_config, size_t config_size);
 
 int viddec_submit(ViddecBackend *b, const uint8_t *data, size_t size,
-                  int64_t pts, int is_key, int eos);
+                  int64_t pts_ns, int64_t pts, int64_t dts, int is_key, int eos);
 
 int viddec_poll(ViddecBackend *b, AVCodecContext *avctx);
 
@@ -80,6 +89,12 @@ int viddec_h264_config_from_avcc(const uint8_t *extradata, size_t extradata_size
                                  uint8_t **out, size_t *out_size);
 int viddec_h264_config_from_annexb(const uint8_t *data, size_t size,
                                    uint8_t **out, size_t *out_size);
+/* Length-prefixed avcC packet -> Annex-B (4-byte start codes).
+ * nal_len_size is 1, 2 or 4 (from avcC lengthSizeMinusOne). */
 int viddec_avcc_to_annexb(const uint8_t *src, size_t src_size,
-                           uint8_t **dst, size_t *dst_cap);
+                           uint8_t **dst, size_t *dst_cap, int nal_len_size);
 int viddec_is_annexb(const uint8_t *data, size_t size);
+/* Extract first SPS/PPS from an Annex-B buffer (for change detection). */
+int viddec_h264_extract_sps_pps(const uint8_t *data, size_t size,
+                                const uint8_t **out_sps, size_t *out_sps_len,
+                                const uint8_t **out_pps, size_t *out_pps_len);
