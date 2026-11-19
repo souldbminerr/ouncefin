@@ -131,10 +131,19 @@ int viddec_submit(ViddecBackend *b, const uint8_t *data, size_t size,
                 b->ts_count--;
             }
             b->n_eagain++;
-            if (!b->eagain_since)
+            if (!b->eagain_since) {
                 b->eagain_since = av_gettime();
-            else if (av_gettime() - b->eagain_since > 5000000) {
+            } else if (av_gettime() - b->eagain_since > 5000000) {
                 b->eagain_since = 0;
+                /* Loud and with state: this kills playback (mpv does not
+                 * switch decoders mid-stream), so it must be diagnosable
+                 * from the log alone. */
+                av_log(NULL, AV_LOG_ERROR,
+                       "viddec: decoder stuck: submit busy for 5s "
+                       "(submit=%llu emit=%llu eagain=%llu in_flight=%d)\n",
+                       (unsigned long long)b->n_submit,
+                       (unsigned long long)b->n_emit,
+                       (unsigned long long)b->n_eagain, b->in_flight);
                 return AVERROR_EXTERNAL;
             }
             return AVERROR(EAGAIN);
@@ -235,6 +244,17 @@ static int viddec_fetch(ViddecBackend *b, AVCodecContext *avctx, AVFrame **out)
     }
     if (vf.end_of_stream)
         b->eos_done = true;
+
+    /* The service reports each image's true visible size. Follow it when
+     * the stream changes resolution in-band (SPS/sequence header), so
+     * frames are allocated at the new size instead of being clamped to
+     * stale avctx dimensions. */
+    if (vf.width > 0 && vf.height > 0 &&
+        ((int)vf.width != avctx->width || (int)vf.height != avctx->height)) {
+        av_log(avctx, AV_LOG_INFO, "viddec: frame size %dx%d -> %ux%u\n",
+               avctx->width, avctx->height, vf.width, vf.height);
+        ff_set_dimensions(avctx, (int)vf.width, (int)vf.height);
+    }
 
     /* Pictures may be padded, so this is needed */
     frame->width = avctx->width;

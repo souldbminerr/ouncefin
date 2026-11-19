@@ -30,6 +30,15 @@ static int viddec_vp8_init(AVCodecContext *avctx)
     ctx->inited = 0;
     avctx->pix_fmt = AV_PIX_FMT_NV12;
     avctx->has_b_frames = 0;
+#ifdef __SWITCH2__
+    /* Same early-create rationale as VP9. */
+    if (avctx->coded_width > 0 && avctx->coded_height > 0) {
+        int ret = viddec_create(&ctx->be, avctx, VIDDEC_CODEC_ID, 0, NULL, 0);
+        if (ret < 0)
+            return ret;
+        ctx->inited = 1;
+    }
+#endif
     return 0;
 }
 

@@ -30,6 +30,19 @@ static int viddec_av1_init(AVCodecContext *avctx)
     ctx->inited = 0;
     avctx->pix_fmt = AV_PIX_FMT_NV12;
     avctx->has_b_frames = 2;
+#ifdef __SWITCH2__
+    /* Same early-create rationale as VP9. AV1 requires block-linear
+     * output and the "video/av1" config string, both passed exactly as
+     * the lazy first-packet create would. */
+    if (avctx->coded_width > 0 && avctx->coded_height > 0) {
+        static const char mime[] = "video/av1";
+        int ret = viddec_create(&ctx->be, avctx, VIDDEC_CODEC_ID, 1,
+                                mime, sizeof(mime));
+        if (ret < 0)
+            return ret;
+        ctx->inited = 1;
+    }
+#endif
     return 0;
 }
 

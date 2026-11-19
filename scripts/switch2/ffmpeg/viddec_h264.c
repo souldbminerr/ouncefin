@@ -9,11 +9,18 @@
  * avcC-vs-AnnexB mode from extradata (not per-packet first-bytes guess),
  * in-band SPS/PPS change detection with decoder recreate, and exact
  * original PTS/DTS passthrough (no rescaled-echo derivation).
+ * Streams without extradata mine SPS/PPS from the first AU (Annex-B or
+ * avcC-converted), and a changed SPS updates avctx coded dimensions
+ * before the recreate (viddec_h264_sps_dims).
  */
+
+#include <string.h>
 
 #include "avcodec.h"
 #include "codec_internal.h"
 #include "decode.h"
+#include "get_bits.h"
+#include "golomb.h"
 #include "packet.h"
 #include "libavutil/log.h"
 #include "libavutil/mem.h"
@@ -107,6 +114,135 @@ static int viddec_h264_init(AVCodecContext *avctx)
     return 0;
 }
 
+/* Parse coded and visible dimensions from an SPS NAL (nal points at the
+ * NAL header byte, sps_len includes it). Emulation prevention bytes are
+ * stripped first; high-profile scaling lists are skipped. Deltas outside
+ * +-255 are clamped (result-equivalent modulo 256) to keep malformed-data
+ * reads overflow-safe. Returns 0 on success. */
+static int viddec_h264_sps_dims(const uint8_t *nal, size_t sps_len,
+                                int *coded_w, int *coded_h,
+                                int *vis_w, int *vis_h)
+{
+    GetBitContext gb;
+    uint8_t *buf;
+    size_t n = 0, i = 0;
+    unsigned profile, sps_id, chroma_idc = 1, poc_type, cycles;
+    unsigned pw_mbs, ph_map, cl = 0, crr = 0, ct = 0, cbb = 0;
+    int separate = 0, frame_mbs_only, subw, subh;
+    int ret = AVERROR_INVALIDDATA;
+
+    if (sps_len < 4 || (nal[0] & 0x1f) != 7)
+        return AVERROR_INVALIDDATA;
+
+    buf = av_malloc(sps_len + AV_INPUT_BUFFER_PADDING_SIZE);
+    if (!buf)
+        return AVERROR(ENOMEM);
+    while (i < sps_len) { /* strip emulation prevention bytes */
+        if (i + 2 < sps_len && nal[i] == 0 && nal[i + 1] == 0 &&
+            nal[i + 2] == 3) {
+            buf[n++] = 0;
+            buf[n++] = 0;
+            i += 3;
+        } else {
+            buf[n++] = nal[i++];
+        }
+    }
+    memset(buf + n, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+
+    if (init_get_bits8(&gb, buf, (int)n) < 0)
+        goto fail;
+
+    skip_bits(&gb, 8);                 /* NAL header */
+    profile = get_bits(&gb, 8);
+    skip_bits(&gb, 16);                /* constraint flags + level_idc */
+    sps_id = get_ue_golomb(&gb);
+    if (sps_id > 31)
+        goto fail;
+    if (profile == 100 || profile == 110 || profile == 122 || profile == 244 ||
+        profile == 44  || profile == 83  || profile == 86  || profile == 118 ||
+        profile == 128 || profile == 138 || profile == 139 || profile == 134 ||
+        profile == 135) {
+        chroma_idc = get_ue_golomb(&gb);
+        if (chroma_idc > 3)
+            goto fail;
+        if (chroma_idc == 3)
+            separate = get_bits1(&gb);
+        get_ue_golomb(&gb);            /* bit_depth_luma_minus8 */
+        get_ue_golomb(&gb);            /* bit_depth_chroma_minus8 */
+        skip_bits1(&gb);               /* qpprime_y_zero_transform_bypass */
+        if (get_bits1(&gb)) {          /* seq_scaling_matrix_present_flag */
+            int lists = chroma_idc == 3 ? 12 : 8;
+            for (int k = 0; k < lists; k++) {
+                if (get_bits1(&gb)) { /* seq_scaling_list_present_flag */
+                    int sz = k < 6 ? 16 : 64;
+                    int last = 8, next = 8;
+                    for (int j = 0; j < sz; j++) {
+                        if (next != 0) {
+                            int d = get_se_golomb(&gb);
+                            if (d < -255) d = -255;
+                            if (d > 255) d = 255;
+                            next = (last + d + 256) % 256;
+                        }
+                        if (next != 0)
+                            last = next;
+                    }
+                }
+            }
+        }
+    }
+    get_ue_golomb(&gb);                /* log2_max_frame_num_minus4 */
+    poc_type = get_ue_golomb(&gb);
+    if (poc_type > 2)
+        goto fail;
+    if (poc_type == 0) {
+        get_ue_golomb(&gb);            /* log2_max_pic_order_cnt_lsb_minus4 */
+    } else if (poc_type == 1) {
+        skip_bits1(&gb);               /* delta_pic_order_always_zero_flag */
+        get_se_golomb(&gb);
+        get_se_golomb(&gb);
+        cycles = get_ue_golomb(&gb);
+        if (cycles > 255)
+            goto fail;
+        for (unsigned k = 0; k < cycles; k++)
+            get_se_golomb(&gb);
+    }
+    get_ue_golomb(&gb);                /* max_num_ref_frames */
+    skip_bits1(&gb);                   /* gaps_in_frame_num_value_allowed */
+    pw_mbs = get_ue_golomb(&gb);       /* pic_width_in_mbs_minus1 */
+    ph_map = get_ue_golomb(&gb);       /* pic_height_in_map_units_minus1 */
+    if (pw_mbs > 511 || ph_map > 511)
+        goto fail;
+    frame_mbs_only = get_bits1(&gb);
+    if (!frame_mbs_only)
+        skip_bits1(&gb);               /* mb_adaptive_frame_field_flag */
+    skip_bits1(&gb);                   /* direct_8x8_inference_flag */
+    if (get_bits1(&gb)) {              /* frame_cropping_flag */
+        cl = get_ue_golomb(&gb);
+        crr = get_ue_golomb(&gb);
+        ct = get_ue_golomb(&gb);
+        cbb = get_ue_golomb(&gb);
+        if (cl > 4095 || crr > 4095 || ct > 4095 || cbb > 4095)
+            goto fail;
+    }
+    if (get_bits_count(&gb) > (int)(n * 8))
+        goto fail;
+
+    *coded_w = (int)(pw_mbs + 1) * 16;
+    *coded_h = (int)(ph_map + 1) * 16 * (2 - frame_mbs_only);
+    subw = (chroma_idc == 1 || chroma_idc == 2) ? 2 : 1;
+    subh = (chroma_idc == 1) ? 2 : 1;
+    if (separate)
+        subw = subh = 1;
+    *vis_w = *coded_w - (int)(cl + crr) * subw;
+    *vis_h = *coded_h - (int)(ct + cbb) * subh * (2 - frame_mbs_only);
+    if (*coded_w <= 0 || *coded_h <= 0 || *vis_w <= 0 || *vis_h <= 0)
+        goto fail;
+    ret = 0;
+fail:
+    av_free(buf);
+    return ret;
+}
+
 static int viddec_h264_check_reconfig(AVCodecContext *avctx, ViddecH264Context *ctx,
                                       const uint8_t *annexb, size_t size)
 {
@@ -128,6 +264,19 @@ static int viddec_h264_check_reconfig(AVCodecContext *avctx, ViddecH264Context *
         return 0;
 
     av_log(avctx, AV_LOG_INFO, "viddec_h264: SPS/PPS changed, recreating decoder\n");
+    /* Size the recreated decoder from the new SPS: the service config
+     * takes the largest coded size of the stream, so a resolution change
+     * must not recreate with stale avctx dimensions. (viddec_fetch()
+     * re-syncs avctx to the service-reported visible size afterwards.) */
+    {
+        int cw, ch, vw, vh;
+        if (viddec_h264_sps_dims(sps, sps_len, &cw, &ch, &vw, &vh) == 0 &&
+            (cw != avctx->coded_width || ch != avctx->coded_height)) {
+            av_log(avctx, AV_LOG_INFO, "viddec_h264: SPS size %dx%d -> coded %dx%d\n",
+                   avctx->coded_width, avctx->coded_height, cw, ch);
+            ff_set_dimensions(avctx, cw, ch);
+        }
+    }
     viddec_close(&ctx->be);
     av_freep(&ctx->config);
     ctx->config = NULL;
@@ -272,22 +421,35 @@ static int viddec_h264_receive_frame(AVCodecContext *avctx, AVFrame *frame)
                     ctx->nal_len_size = 4;
                     ctx->is_avcc = 0;
                 } else {
+                    /* avcC length-prefixed stream without avcC extradata:
+                     * convert with default 4-byte lengths, then mine
+                     * SPS/PPS from the converted AU (in-band parameter
+                     * sets). The packet itself is kept and submitted. */
                     uint8_t *cfg = NULL;
                     size_t sz = 0;
-                    int l = 4;
-                    uint8_t tmp[8];
-                    (void)tmp;
-                    ret = viddec_avcc_to_annexb(pkt.data, pkt.size,
-                                                &ctx->be.conv_buf,
-                                                &ctx->be.conv_size, l);
-                    if (ret < 0) {
+                    int conv = viddec_avcc_to_annexb(pkt.data, pkt.size,
+                                                     &ctx->be.conv_buf,
+                                                     &ctx->be.conv_size, 4);
+                    if (conv < 0) {
                         av_packet_unref(&pkt);
-                        av_log(avctx, AV_LOG_ERROR, "viddec_h264: no SPS/PPS in first packet\n");
+                        av_log(avctx, AV_LOG_ERROR,
+                               "viddec_h264: first packet avcC convert failed\n");
                         return AVERROR_INVALIDDATA;
                     }
-                    av_packet_unref(&pkt);
-                    av_log(avctx, AV_LOG_ERROR, "viddec_h264: no SPS/PPS in first packet\n");
-                    return AVERROR_INVALIDDATA;
+                    ret = viddec_h264_config_from_annexb(ctx->be.conv_buf,
+                                                         (size_t)conv,
+                                                         &cfg, &sz);
+                    if (ret < 0) {
+                        av_packet_unref(&pkt);
+                        av_log(avctx, AV_LOG_ERROR,
+                               "viddec_h264: no SPS/PPS in first packet\n");
+                        return AVERROR_INVALIDDATA;
+                    }
+                    ctx->config = cfg;
+                    ctx->config_size = sz;
+                    ctx->config_ok = 1;
+                    ctx->nal_len_size = 4;
+                    ctx->is_avcc = 1;
                 }
 #ifdef __SWITCH2__
                 ret = viddec_create(&ctx->be, avctx, VIDDEC_CODEC_ID, 0,
