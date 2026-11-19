@@ -4,9 +4,13 @@
 
 #pragma once
 
+#include <atomic>
 #include <borealis.hpp>
 #include <borealis/core/singleton.hpp>
+#include <condition_variable>
 #include <mpv/client.h>
+#include <mutex>
+#include <thread>
 #include <utils/event.hpp>
 #ifdef MPV_SW_RENDER
 #include <mpv/render.h>
@@ -175,25 +179,50 @@ private:
 
 #ifdef MPV_SW_RENDER
     const int PIXCEL_SIZE = 4;
-    int nvg_image = 0;
-    const char *sw_format = "rgba";
     int sw_size[2] = {
         (int)brls::Application::windowWidth,
         (int)brls::Application::windowHeight,
     };
     size_t pitch = PIXCEL_SIZE * sw_size[0];
-    void *pixels = nullptr;
-    // Incremented each time on_update renders a new frame into `pixels`.
-    // draw() skips the GPU upload when nothing changed (UI runs at display
-    // rate, video at content rate: most draws would re-upload identical
-    // pixels otherwise).
-    uint64_t sw_seq = 0;
-    uint64_t sw_uploaded = 0;
+    const char *sw_format = "rgba";
+    /* Ping-pong CPU frame slots. on_update renders into the back slot on
+     * mpv's callback thread (SW render writes only CPU memory, so the
+     * swscale NV12->RGBA conversion — the heaviest per-frame CPU cost —
+     * stays off the UI thread); draw() uploads the newest completed slot
+     * from the UI thread. On deko3d/drako3d the slots are the video
+     * textures' persistent upload backings (dual-mapped CPU + GPU
+     * memory), so the upload is a GPU-side copy with no staging buffer
+     * and no GPU sync. Elsewhere they are plain malloc buffers and the
+     * nanovg backend stages them itself. */
+    void *pixels[2] = {nullptr, nullptr};
+    bool sw_owned[2] = {false, false};  // slot memory owned by us (malloc)
+    int nvg_image[2] = {0, 0};          // one nanovg texture per slot
+    // Completed render count, published by the mpv render thread after
+    // each render; draw() skips the GPU upload when nothing changed (UI
+    // runs at display rate, video at content rate).
+    std::atomic<uint64_t> sw_seq{0};
+    uint64_t sw_uploaded = 0;   // last uploaded sw_seq (UI thread only)
+    int sw_latest = 0;          // slot holding the newest completed render
+    std::mutex sw_mutex;        // slots/params vs the render worker
+    void swRender();            // render worker body
+    // Dedicated render thread: the libmpv contract forbids calling
+    // mpv_render_* from inside the update callback, and the swscale
+    // conversion must not run on the UI thread. The callback only wakes
+    // this worker (swWake); it is the only caller of update/render.
+    void swWake();
+    void swStart();
+    void swStop();
+    void swRenderThread();
+    std::thread sw_thread;
+    std::mutex sw_wake_mutex;
+    std::condition_variable sw_wake_cv;
+    bool sw_wake = false;
+    bool sw_wake_stop = false;
     mpv_render_param mpv_params[5] = {
         {MPV_RENDER_PARAM_SW_SIZE, &sw_size[0]},
         {MPV_RENDER_PARAM_SW_FORMAT, (void *)sw_format},
         {MPV_RENDER_PARAM_SW_STRIDE, &pitch},
-        {MPV_RENDER_PARAM_SW_POINTER, pixels},
+        {MPV_RENDER_PARAM_SW_POINTER, nullptr},
         {MPV_RENDER_PARAM_INVALID, nullptr},
     };
 #elif defined(BOREALIS_USE_D3D11)

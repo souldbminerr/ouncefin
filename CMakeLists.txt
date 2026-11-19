@@ -23,18 +23,19 @@ cmake_dependent_option(USE_LIBUSBHSFS "Use libusbhsfs for ums access" OFF "PLATF
 # If your system does not support OpenGL(ES), you can use software rendering, but it will affect performance.
 option(MPV_SW_RENDER "Using CPU to draw videos" OFF)
 
-# Nintendo Switch 2 (libounce + drako3d, software video decode)
+# Nintendo Switch 2 (libounce + drako3d, hardware decode + GPU video path)
 # drako3d v0.5.0 (Tegra T239/Ampere, deko3d-compatible Dk*/dk:: API) ships in
 # $DEVKITPRO/libounce (headers + libdrako3d.a/libdrako3dd.a). UI rendering goes
-# through drako3d (Borealis Switch video path); video frames go through
-# MPV_SW_RENDER (FFmpeg SW decode -> RGBA upload to nanovg-dk), so no mpv GPU
-# backend is needed.
-option(PLATFORM_SWITCH2 "build for Switch 2 (libounce + drako3d, software decode)" OFF)
+# through drako3d (Borealis Switch video path); video frames render via
+# libmpv's deko3d backend directly into the app swapchain (GPU scaler), with
+# the FFmpeg viddec decoders feeding NV12. Requires the Switch 2 libmpv
+# built with -Ddeko3d=enabled -Ddeko3d_precompiled=true (see
+# scripts/switch2/mpv/).
+option(PLATFORM_SWITCH2 "build for Switch 2 (libounce + drako3d, GPU video path)" OFF)
 option(USE_DRAKO3D "Using drako3d instead of deko3d/OpenGL (Switch 2, requires drako3d in libounce)" OFF)
 if (PLATFORM_SWITCH2)
-    message(STATUS "PLATFORM_SWITCH2: libounce + drako3d + software video path")
+    message(STATUS "PLATFORM_SWITCH2: libounce + drako3d + GPU video path")
     set(PLATFORM_SWITCH ON)
-    set(MPV_SW_RENDER ON CACHE BOOL "Using CPU to draw videos" FORCE)
     set(BUILTIN_NSP OFF CACHE BOOL "" FORCE)
     set(USE_LIBUSBHSFS OFF CACHE BOOL "" FORCE)
     # deko3d targets Switch 1 Maxwell only. With USE_DRAKO3D, reuse the
@@ -260,6 +261,15 @@ if (PLATFORM_SWITCH2)
     # switch2 ffmpeg enables mbedtls (TLS); its static libs must come after
     # curl/ffmpeg on the link line (switch portlibs has them, switch2 does not).
     list(APPEND APP_PLATFORM_LIB mbedtls mbedx509 mbedcrypto)
+    # libmpv's deko3d backend is compiled against drako3d and the runtime
+    # shader-compiler stack; their transitive entries sit in mpv's
+    # Requires.private (plain pkg-config does not propagate those), and
+    # static archives must follow libmpv.a on the link line. The
+    # de-vendored shaderc_combined carries shaderc + shaderc_util only:
+    # glslang, its SPIRV codegen and the resource limits, and SPIRV-Tools
+    # must follow explicitly (in dependency order).
+    list(APPEND APP_PLATFORM_LIB drako3d uam2rt shaderc_combined
+        glslang SPIRV glslang-default-resource-limits SPIRV-Tools-opt SPIRV-Tools)
 endif ()
 
 if (BUILTIN_NSP)

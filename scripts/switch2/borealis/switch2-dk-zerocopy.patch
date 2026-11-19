@@ -1,0 +1,203 @@
+diff --git a/library/include/borealis/extern/nanovg/dk_renderer.hpp b/library/include/borealis/extern/nanovg/dk_renderer.hpp
+index 93e4095e..e595e037 100644
+--- a/library/include/borealis/extern/nanovg/dk_renderer.hpp
++++ b/library/include/borealis/extern/nanovg/dk_renderer.hpp
+@@ -126,6 +126,14 @@ namespace nvg {
+             dk::ImageDescriptor m_image_descriptor;
+             CMemPool::Handle m_image_mem;
+             DKNVGtextureDescriptor m_texture_descriptor;
++            /* borealis addition: persistent CPU-writable backing for
++             * NVG_IMAGE_STREAMING images, allocated from the dual-mapped
++             * (CPU + GPU) data pool. A client renders directly into
++             * GetUploadPtr() and passes that same pointer to
++             * nvgUpdateImage: the update then copies GPU-side with no
++             * staging buffer and no GPU sync. */
++            CMemPool::Handle m_upload_mem;
++            u8* m_upload_ptr = nullptr;
+         public:
+             Texture(int id);
+             ~Texture();
+@@ -138,6 +146,10 @@ namespace nvg {
+ 
+             dk::Image &GetImage();
+             dk::ImageDescriptor &GetImageDescriptor();
++
++            /* borealis addition: zero-copy upload backing accessors. */
++            u8* GetUploadPtr() { return m_upload_ptr; }
++            DkGpuAddr GetUploadGpuAddr() { return m_upload_mem.getGpuAddr(); }
+     };
+ 
+     class DkRenderer {
+@@ -172,6 +184,20 @@ namespace nvg {
+             CMemPool::Handle m_view_uniform_buffer;
+             CMemPool::Handle m_frag_uniform_buffer;
+ 
++            /* borealis addition: zero-copy upload synchronization. The
++             * direct-copy path (see UpdateTexture) submits without any
++             * waitIdle, so its command memory must never be freed while
++             * the GPU may still be executing it. Command memory is
++             * pooled in a small ring and recycled behind fences: before
++             * a slot is reused, its fence (signaled many frames ago) is
++             * waited on, which is instant in practice. */
++            static constexpr int UploadRingSize = 8;
++            dk::UniqueCmdBuf m_upload_cmd;
++            CMemPool::Handle m_upload_cmdmem[UploadRingSize];
++            dk::Fence m_upload_fence[UploadRingSize];
++            bool m_upload_fence_used[UploadRingSize] = {};
++            int m_upload_ring = 0;
++
+             u32 m_next_texture_id = 1;
+             std::vector<std::shared_ptr<Texture>> m_textures;
+             CDescriptorSet<MaxImages> m_image_descriptor_set;
+@@ -206,6 +232,12 @@ namespace nvg {
+             int GetTextureSize(const DKNVGcontext &ctx, int id, int *w, int *h);
+             const DKNVGtextureDescriptor *GetTextureDescriptor(const DKNVGcontext &ctx, int id);
+ 
++            /* borealis addition: zero-copy video upload. Returns the CPU
++             * address of a texture's persistent upload backing for
++             * NVG_IMAGE_STREAMING images (dual-mapped CPU + GPU memory),
++             * or nullptr when the texture has none. */
++            unsigned char* GetImageBacking(int image);
++
+             CDescriptorSet<4096U> *GetImageDescriptor() { return &m_image_descriptor_set; }
+             int AllocateImageIndex();
+ 
+diff --git a/library/include/borealis/platforms/switch/switch_video.hpp b/library/include/borealis/platforms/switch/switch_video.hpp
+index 11a213b1..94bdff84 100644
+--- a/library/include/borealis/platforms/switch/switch_video.hpp
++++ b/library/include/borealis/platforms/switch/switch_video.hpp
+@@ -68,6 +68,12 @@ class SwitchVideoContext : public VideoContext
+ 
+     void queueFlush();
+ 
++    /* borealis addition: zero-copy video upload. CPU address of a
++     * texture's persistent upload backing (NVG_IMAGE_STREAMING images,
++     * dual-mapped CPU + GPU memory) for a client (mpv SW render) to
++     * render into; nullptr when unavailable. */
++    unsigned char* getImageBacking(int image);
++
+   private:
+     _LibNXEvent defaultDisplayResolutionChangeEvent;
+     bool displayResolutionChangeEventReady = true;
+diff --git a/library/lib/extern/nanovg/deko3d/dk_renderer.cpp b/library/lib/extern/nanovg/deko3d/dk_renderer.cpp
+index 9b3d8dc6..0403dd85 100644
+--- a/library/lib/extern/nanovg/deko3d/dk_renderer.cpp
++++ b/library/lib/extern/nanovg/deko3d/dk_renderer.cpp
+@@ -58,6 +58,11 @@ namespace nvg {
+ 
+     Texture::~Texture() {
+         m_image_mem.destroy();
++        /* borealis addition: release the zero-copy upload backing. */
++        if (m_upload_ptr) {
++            m_upload_mem.destroy();
++            m_upload_ptr = nullptr;
++        }
+     }
+ 
+     void Texture::Initialize(CMemPool &image_pool, CMemPool &scratch_pool, dk::Device device, dk::Queue queue, int type, int w, int h, int image_flags, const u8 *data) {
+@@ -68,6 +73,20 @@ namespace nvg {
+             .flags = image_flags,
+         };
+ 
++        /* borealis addition: NVG_IMAGE_STREAMING gives the texture a
++         * persistent backing in dual-mapped (CPU + GPU) pool memory, so
++         * a client can render into it directly and the GPU can copy from
++         * it without a staging buffer. */
++        if (image_flags & NVG_IMAGE_STREAMING) {
++            const size_t backingSize = type == NVG_TEXTURE_RGBA ? (size_t)w * h * 4 : (size_t)w * h;
++            m_upload_mem = scratch_pool.allocate((uint32_t)backingSize, DK_IMAGE_LINEAR_STRIDE_ALIGNMENT);
++            m_upload_ptr = static_cast<u8*>(m_upload_mem.getCpuAddr());
++            if (data != nullptr) {
++                memcpy(m_upload_ptr, data, backingSize);
++                data = m_upload_ptr;
++            }
++        }
++
+         /* Create an image layout. */
+         dk::ImageLayout layout;
+         auto layout_maker = dk::ImageLayoutMaker{device}.setFlags(0).setDimensions(w, h);
+@@ -124,6 +143,13 @@ namespace nvg {
+         CMemPool::Handle init_cmd_mem = m_data_mem_pool.allocate(DK_MEMBLOCK_ALIGNMENT);
+         init_cmd_buf.addMemory(init_cmd_mem.getMemBlock(), init_cmd_mem.getOffset(), init_cmd_mem.getSize());
+ 
++        /* borealis addition: zero-copy upload ring (command memory is
++         * pooled; see UpdateTexture for the recycling protocol). */
++        m_upload_cmd = dk::CmdBufMaker{m_device}.create();
++        for (int i = 0; i < UploadRingSize; i++) {
++            m_upload_cmdmem[i] = m_data_mem_pool.allocate(DK_MEMBLOCK_ALIGNMENT);
++        }
++
+         for (u8 i = 0; i < SamplerType_Total; i++) {
+             const DkFilter filter = (i & SamplerType_Nearest) ? DkFilter_Nearest : DkFilter_Linear;
+             const DkMipFilter mip_filter = (i & SamplerType_Nearest) ? DkMipFilter_Nearest : DkMipFilter_Linear;
+@@ -484,6 +510,37 @@ namespace nvg {
+         }
+ 
+         const DKNVGtextureDescriptor &tex_desc = texture->GetDescriptor();
++
++        /* borealis addition: zero-copy upload. The client rendered
++         * directly into this texture's persistent backing (see
++         * NVG_IMAGE_STREAMING): copy GPU-side from the backing's GPU
++         * address. m_queue is the same in-order queue the frame is
++         * rendered on, so this copy completes before the draw commands
++         * submitted later this frame sample the image, and the backing
++         * is permanent, so there is no staging buffer. Nothing may be
++         * freed while the GPU may still be executing, so the command
++         * memory is pooled: each ring slot is waited on (its fence is
++         * many frames old) before reuse, which is instant, and no
++         * waitIdle is needed. */
++        if (y == 0 && texture->GetUploadPtr() != nullptr && data == texture->GetUploadPtr()) {
++            const int ring = m_upload_ring;
++            m_upload_ring = (m_upload_ring + 1) % UploadRingSize;
++            if (m_upload_fence_used[ring]) {
++                m_queue.waitFence(m_upload_fence[ring]);
++            }
++            m_upload_fence_used[ring] = true;
++
++            m_upload_cmd.clear();
++            m_upload_cmd.addMemory(m_upload_cmdmem[ring].getMemBlock(), m_upload_cmdmem[ring].getOffset(), m_upload_cmdmem[ring].getSize());
++
++            dk::ImageView imageView{texture->GetImage()};
++            m_upload_cmd.copyBufferToImage({ texture->GetUploadGpuAddr() }, imageView, { 0, 0, 0, (uint32_t)tex_desc.width, (uint32_t)tex_desc.height, 1 });
++            m_upload_cmd.signalFence(m_upload_fence[ring]);
++
++            m_queue.submitCommands(m_upload_cmd.finishList());
++            return 1;
++        }
++
+         if (tex_desc.type == NVG_TEXTURE_RGBA) {
+             data += y * tex_desc.width*4;
+         } else {
+@@ -496,6 +553,14 @@ namespace nvg {
+         return 1;
+     }
+ 
++    unsigned char* DkRenderer::GetImageBacking(int image) {
++        const std::shared_ptr<Texture> texture = this->FindTexture(image);
++        if (texture == nullptr) {
++            return nullptr;
++        }
++        return texture->GetUploadPtr();
++    }
++
+     int DkRenderer::GetTextureSize(const DKNVGcontext &ctx, int image, int *w, int *h) {
+         const auto descriptor = this->GetTextureDescriptor(ctx, image);
+         if (descriptor == nullptr) {
+diff --git a/library/lib/platforms/switch/switch_video.cpp b/library/lib/platforms/switch/switch_video.cpp
+index 7fb06632..aa8ec3fd 100644
+--- a/library/lib/platforms/switch/switch_video.cpp
++++ b/library/lib/platforms/switch/switch_video.cpp
+@@ -236,6 +236,13 @@ void SwitchVideoContext::setSwapInterval(int interval)
+     swapchain.setSwapInterval(interval);
+ }
+ 
++unsigned char* SwitchVideoContext::getImageBacking(int image)
++{
++    if (this->renderer.has_value())
++        return this->renderer->GetImageBacking(image);
++    return nullptr;
++}
++
+ void SwitchVideoContext::destroyFramebufferResources()
+ {
+     // Return early if we have nothing to destroy

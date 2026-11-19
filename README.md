@@ -9,6 +9,7 @@ Features:
    - For the formats that aren't supported, software is used (dav1d/ffmpeg software)
  - High networking performance (Inmemory cache isn't needed, but reccomended)
  - 4K output support for 4K videos.
+ - GPU Rendering acceleration for scaling
 
 This is a fork of switchfin, the unmodified Switchfin readme follows
 

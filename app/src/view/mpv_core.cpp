@@ -47,6 +47,11 @@ static void *get_proc_address(void *unused, const char *name) {
 #endif
 #endif
 
+#if defined(MPV_SW_RENDER) && defined(BOREALIS_USE_DEKO3D)
+// Zero-copy upload backing access (see setFrameSize / dk renderer).
+#include <borealis/platforms/switch/switch_video.hpp>
+#endif
+
 #ifdef ANDROID
 #include <jni.h>
 extern "C" {
@@ -82,8 +87,15 @@ static void deleteSurfaceObj() {
 #endif
 
 void MPVCore::on_update(void *self) {
-#if defined(MPV_SW_RENDER) || defined(BOREALIS_USE_GXM)
-    // SW/GXM 在回调中直接渲染，必须调用 update()。
+#if defined(MPV_SW_RENDER)
+    // Never call mpv_render_* from within this callback (libmpv contract).
+    // Wake the dedicated render worker: it does the swscale NV12->RGBA
+    // conversion off the UI thread, so the UI tick keeps only the GPU
+    // upload + nanovg draw. draw() picks up the newest completed slot
+    // through the sw_seq handshake.
+    reinterpret_cast<MPVCore *>(self)->swWake();
+#elif defined(BOREALIS_USE_GXM)
+    // GXM renders into GPU objects, so it must stay on the UI thread.
     MPVCore *mpv = reinterpret_cast<MPVCore *>(self);
     brls::sync([mpv]() {
         if (!mpv->mpv_context) return;
@@ -91,15 +103,69 @@ void MPVCore::on_update(void *self) {
         if (flags & MPV_RENDER_UPDATE_FRAME) {
             mpv_render_context_render(mpv->mpv_context, mpv->mpv_params);
             mpv_render_context_report_swap(mpv->mpv_context);
-#ifdef MPV_SW_RENDER
-            mpv->sw_seq++;
-#endif
         }
     });
 #else
     (void)self;
 #endif
 }
+
+#ifdef MPV_SW_RENDER
+
+void MPVCore::swWake() {
+    {
+        std::lock_guard<std::mutex> lock(sw_wake_mutex);
+        sw_wake = true;
+    }
+    sw_wake_cv.notify_all();
+}
+
+void MPVCore::swStart() {
+    if (sw_thread.joinable()) return;
+    sw_wake = false;
+    sw_wake_stop = false;
+    sw_thread = std::thread(&MPVCore::swRenderThread, this);
+}
+
+void MPVCore::swStop() {
+    if (!sw_thread.joinable()) return;
+    {
+        std::lock_guard<std::mutex> lock(sw_wake_mutex);
+        sw_wake_stop = true;
+    }
+    sw_wake_cv.notify_all();
+    sw_thread.join();
+}
+
+void MPVCore::swRenderThread() {
+    while (true) {
+        {
+            std::unique_lock<std::mutex> lock(sw_wake_mutex);
+            sw_wake_cv.wait(lock, [this]() { return sw_wake_stop || sw_wake; });
+            if (sw_wake_stop) return;
+            sw_wake = false;
+        }
+        swRender();
+    }
+}
+
+void MPVCore::swRender() {
+    if (!mpv_context) return;
+    std::lock_guard<std::mutex> lock(sw_mutex);
+    uint64_t flags = mpv_render_context_update(mpv_context);
+    if (flags & MPV_RENDER_UPDATE_FRAME) {
+        int slot = 1 - sw_latest;
+        if (!pixels[slot]) return;
+        // Render into the slot the UI is not uploading from.
+        mpv_params[3].data = pixels[slot];
+        mpv_render_context_render(mpv_context, mpv_params);
+        mpv_render_context_report_swap(mpv_context);
+        sw_latest = slot;
+        sw_seq.fetch_add(1, std::memory_order_release);
+    }
+}
+
+#endif // MPV_SW_RENDER
 
 void MPVCore::on_wakeup(void *self) {
     MPVCore *mpv = reinterpret_cast<MPVCore *>(self);
@@ -112,11 +178,12 @@ MPVCore::MPVCore() {
     brls::Application::getExitEvent()->subscribe([this]() {
         this->clean();
 #ifdef MPV_SW_RENDER
-        if (this->pixels) {
-            free(this->pixels);
-            this->pixels = nullptr;
-            this->mpv_params[3].data = nullptr;
+        for (int s = 0; s < 2; s++) {
+            if (this->pixels[s] && this->sw_owned[s]) free(this->pixels[s]);
+            this->pixels[s] = nullptr;
+            this->sw_owned[s] = false;
         }
+        this->mpv_params[3].data = nullptr;
 #endif
     });
 }
@@ -140,12 +207,20 @@ void MPVCore::init() {
     mpv_set_option_string(mpv, "config-dir", confDir.c_str());
     mpv_set_option_string(mpv, "sub-fonts-dir", confDir.c_str());
     mpv_set_option_string(mpv, "watch-later-dir", fmt::format("{}/watch-later", confDir).c_str());
-    mpv_set_option_string(mpv, "gpu-shader-cache-dir", fmt::format("{}/cache", confDir).c_str());
+    // vo_gpu persists compiled shader programs here (dk_shadercache
+    // blobs, keyed by generated GLSL) so runtime compilation
+    // (switch2: shaderc + uam2rt) happens once per variant.
+    mpv_set_option_string(mpv, "gpu-shader-cache-dir", fmt::format("{}/mpv_shader_cache", confDir).c_str());
     mpv_set_option_string(mpv, "ytdl", "no");
     mpv_set_option_string(mpv, "referrer", conf.getUrl().c_str());
     mpv_set_option_string(mpv, "user-agent", HTTP::USER_AGENT.c_str());
     mpv_set_option_string(mpv, "osd-level", "0");
-    mpv_set_option_string(mpv, "video-timing-offset", "0");  // 60fps
+    // Frames marked late by mpv's audio-clock schedule used to throttle
+    // the UI thread (render happened there), so this was forced to 0.
+    // Rendering is now off-thread: restore mpv's default head start so
+    // the VO fires the update callback before the display target and
+    // its display-clock model (built from our swap reports) has slack.
+    mpv_set_option_string(mpv, "video-timing-offset", "0.05");
     mpv_set_option_string(mpv, "reset-on-next-file", "speed,pause");
     mpv_set_option_string(mpv, "subs-fallback", SUBS_FALLBACK ? "yes" : "no");
     mpv_set_option_string(mpv, "vo", MPVCore::VO.c_str());
@@ -363,11 +438,33 @@ void MPVCore::init() {
     brls::Logger::info("version: {} ffmpeg {}", getString("mpv-version"), getString("ffmpeg-version"));
 
     this->command("set", "audio-client-name", AppVersion::getPackageName().c_str());
+#if defined(__SWITCH2__) && !defined(MPV_SW_RENDER)
+    /* The deko3d backend has no on-device shader compiler: it serves
+     * precompiled DKSH (romfs first, SD second) keyed by the GLSL mpv
+     * generates. Pin every option that would change the generated
+     * shader text, so the shipped blob set is complete: bilinear
+     * scalers (separable kernels would require compute passes), no
+     * deband, no interpolation, no temporal dithering. Set after
+     * mpv_initialize so a user mpv.conf cannot reopen the variant
+     * space; anything unexpected falls back to the dump path. */
+    mpv_set_option_string(mpv, "scale", "bilinear");
+    mpv_set_option_string(mpv, "dscale", "bilinear");
+    mpv_set_option_string(mpv, "cscale", "bilinear");
+    mpv_set_option_string(mpv, "deband", "no");
+    mpv_set_option_string(mpv, "interpolation", "no");
+    mpv_set_option_string(mpv, "temporal-dither", "no");
+#endif
     // set event callback
     mpv_set_wakeup_callback(mpv, on_wakeup, this);
 #ifndef ANDROID
     // set render callback
     mpv_render_context_set_update_callback(mpv_context, on_update, this);
+#ifdef MPV_SW_RENDER
+    // Dedicated render worker: on_update only wakes it (the libmpv
+    // contract forbids mpv_render_* calls inside the callback), and it
+    // keeps the swscale NV12->RGBA conversion off the UI thread.
+    swStart();
+#endif
 #endif
 
     focusSubscription = brls::Application::getWindowFocusChangedEvent()->subscribe([this](bool focus) {
@@ -407,6 +504,11 @@ void MPVCore::clean() {
 
     brls::Logger::info("trying free mpv context");
     if (this->mpv_context) {
+#ifdef MPV_SW_RENDER
+        // Stop (and join) the render worker before destroying the
+        // context it renders into.
+        swStop();
+#endif
         mpv_render_context_free(this->mpv_context);
         this->mpv_context = nullptr;
     }
@@ -476,6 +578,13 @@ void MPVCore::setFrameSize(brls::Rect area) {
 #ifdef BOREALIS_USE_D3D11
     // 使用 dx11 的拷贝交换，否则视频渲染异常
     const static int mpvImageFlags = NVG_IMAGE_STREAMING | NVG_IMAGE_COPY_SWAP;
+#elif defined(BOREALIS_USE_DEKO3D)
+    // drako3d (deko3d-compatible): STREAMING gives the texture a
+    // persistent backing in dual-mapped (CPU + GPU) memory. mpv renders
+    // straight into it and nvgUpdateImage copies GPU-side: no staging
+    // buffer, no waitIdle (see dk_renderer / SwitchVideoContext::
+    // getImageBacking).
+    const static int mpvImageFlags = NVG_IMAGE_STREAMING;
 #else
     const static int mpvImageFlags = 0;
 #endif
@@ -484,27 +593,68 @@ void MPVCore::setFrameSize(brls::Rect area) {
     if (drawWidth == 0 || drawHeight == 0) return;
     int frameSize = drawWidth * drawHeight;
 
-    if (pixels != nullptr && frameSize > sw_size[0] * sw_size[1]) {
-        brls::Logger::debug("Enlarge video surface buffer");
-        free(pixels);
-        pixels = nullptr;
-    }
-
-    if (pixels == nullptr) {
-        pixels = malloc(frameSize * PIXCEL_SIZE);
-        mpv_params[3].data = pixels;
-    }
-    // memset so garbage isn't presented
-    memset(pixels, 0, (size_t)frameSize * PIXCEL_SIZE);
-
     auto vg = brls::Application::getNVGContext();
-    if (nvg_image) nvgDeleteImage(vg, nvg_image);
-    nvg_image = nvgCreateImageRGBA(vg, drawWidth, drawHeight, mpvImageFlags, (const unsigned char *)pixels);
-    sw_uploaded = sw_seq - 1;
+    {
+        // Blocks the mpv render thread for the duration of the swap.
+        std::lock_guard<std::mutex> lock(sw_mutex);
 
-    sw_size[0] = drawWidth;
-    sw_size[1] = drawHeight;
-    pitch = PIXCEL_SIZE * drawWidth;
+        for (int s = 0; s < 2; s++) {
+            if (pixels[s] && sw_owned[s]) free(pixels[s]);
+            pixels[s] = nullptr;
+            sw_owned[s] = false;
+            if (nvg_image[s]) {
+                nvgDeleteImage(vg, nvg_image[s]);
+                nvg_image[s] = 0;
+            }
+        }
+
+        for (int s = 0; s < 2; s++) {
+            // Zero-copy slots: the texture's own upload backing. Fall
+            // back to a plain malloc buffer when unavailable.
+            void *mem = nullptr;
+#ifdef BOREALIS_USE_DEKO3D
+            if (auto vc = dynamic_cast<brls::SwitchVideoContext *>(
+                    brls::Application::getPlatform()->getVideoContext())) {
+                nvg_image[s] = nvgCreateImageRGBA(vg, drawWidth, drawHeight, mpvImageFlags, nullptr);
+                if (nvg_image[s]) mem = vc->getImageBacking(nvg_image[s]);
+            }
+#endif
+            if (!mem) {
+                // Plain (D3D11/GL) path: create the image with the
+                // buffer as initial data, as before.
+                mem = malloc(frameSize * PIXCEL_SIZE);
+                if (mem) {
+                    sw_owned[s] = true;
+                    // memset so garbage isn't presented
+                    memset(mem, 0, (size_t)frameSize * PIXCEL_SIZE);
+                    if (!nvg_image[s])
+                        nvg_image[s] = nvgCreateImageRGBA(vg, drawWidth, drawHeight, mpvImageFlags,
+                            (const unsigned char *)mem);
+                }
+            } else {
+                // memset so garbage isn't presented
+                memset(mem, 0, (size_t)frameSize * PIXCEL_SIZE);
+            }
+            if (!mem || !nvg_image[s]) {
+                if (mem && sw_owned[s]) free(mem);
+                if (nvg_image[s]) nvgDeleteImage(vg, nvg_image[s]);
+                nvg_image[s] = 0;
+                pixels[s] = nullptr;
+                sw_owned[s] = false;
+                continue;
+            }
+            pixels[s] = mem;
+        }
+
+        sw_size[0] = drawWidth;
+        sw_size[1] = drawHeight;
+        pitch = PIXCEL_SIZE * drawWidth;
+        // Publish the cleared surfaces (seq 1 != uploaded 0) and reset
+        // the slot state; draw() runs on this same thread.
+        sw_latest = 0;
+        sw_uploaded = 0;
+        sw_seq.store(1, std::memory_order_release);
+    }
 #elif defined(BOREALIS_USE_GXM)
     // This line will be called between beginFrame() and endFrame() in Application::frame(),
     // but mpvRenderContextRender(...) will call functions similar to beginFrame() and endFrame() to draw content to FBO,
@@ -534,13 +684,18 @@ void MPVCore::draw(brls::Rect area, float alpha) {
     if (!(this->rect == area)) this->setFrameSize(area);
 
 #ifdef MPV_SW_RENDER
-    if (!pixels) return;
+    if (!pixels[0] || !nvg_image[0]) return;
 
     auto *vg = brls::Application::getNVGContext();
 
-    if (sw_uploaded != sw_seq) {
-        nvgUpdateImage(vg, nvg_image, (const unsigned char *)pixels);
-        sw_uploaded = sw_seq;
+    // Publish the newest completed slot. Read the sequence first, then
+    // the slot it names: a render landing between the two reads can
+    // only cost one re-upload on the next tick, never a torn one.
+    uint64_t seq = sw_seq.load(std::memory_order_acquire);
+    int slot = sw_latest;
+    if (sw_uploaded != seq) {
+        nvgUpdateImage(vg, nvg_image[slot], (const unsigned char *)pixels[slot]);
+        sw_uploaded = seq;
     }
 
     // draw black background
@@ -552,7 +707,7 @@ void MPVCore::draw(brls::Rect area, float alpha) {
     // draw video
     nvgBeginPath(vg);
     nvgRect(vg, rect.getMinX(), rect.getMinY(), rect.getWidth(), rect.getHeight());
-    nvgFillPaint(vg, nvgImagePattern(vg, 0, 0, rect.getWidth(), rect.getHeight(), 0, nvg_image, alpha));
+    nvgFillPaint(vg, nvgImagePattern(vg, 0, 0, rect.getWidth(), rect.getHeight(), 0, nvg_image[slot], alpha));
     nvgFill(vg);
 #elif defined(BOREALIS_USE_GXM)
     NVGcontext *vg = brls::Application::getNVGContext();

@@ -1,0 +1,239 @@
+--- mpv-pristine/video/out/deko3d/ra_dk.c	2026-11-19 16:18:12.429761500 -0500
++++ mpv-0.36.0-sw/video/out/deko3d/ra_dk.c	2026-11-19 16:24:14.444038200 -0500
+@@ -19,7 +19,13 @@
+ 
+ #include <libavutil/intreadwrite.h>
+ #include <switch.h>
++#ifndef __SWITCH2__
+ #include <libuam/libuam.h>
++#else
++#include <stdio.h>
++#include <sys/stat.h>
++#include <inttypes.h>
++#endif
+ 
+ #include "common/msg.h"
+ 
+@@ -78,6 +84,90 @@
+ };
+ _Static_assert(sizeof(struct dk_shadercache_hdr) == 0x20);
+ 
++#ifdef __SWITCH2__
++/*
++ * Switch 2 (T239/Ampere) has no on-device shader compiler: libuam emits
++ * the Maxwell microcode the Ampere GPU rejects. Compiled DKSH code is
++ * produced offline with uam2 and served here as dk_shadercache blobs
++ * (the same format save_shader_code/load_shader_code exchange through
++ * vo_gpu's cached_program), keyed by an FNV-1a hash of the GLSL
++ * sources. On a miss the requested sources are dumped to SD so they
++ * can be compiled offline; see switchfin/scripts/switch2/mpv/.
++ */
++#define DK_SHADER_ROMFS "romfs:/mpv-shaders"
++#define DK_SHADER_DIR  "sdmc:/switch/Switchfin/shaders"
++#define DK_SHADER_DUMP "sdmc:/switch/Switchfin/shader-dump"
++
++static uint64_t dk_shader_hash(const char *a, const char *b) {
++    const uint64_t prime = 0x100000001b3ULL;
++    uint64_t h = 0xcbf29ce484222325ULL;
++    for (int i = 0; i < 2; i++) {
++        for (const char *p = i ? b : a; p && *p; p++) {
++            h ^= (uint8_t)*p;
++            h *= prime;
++        }
++        h ^= 0xff;
++        h *= prime;
++    }
++    return h;
++}
++
++static void dk_shader_write_file(const char *dir, uint64_t hash, const char *stage, const char *src) {
++    char path[256];
++    snprintf(path, sizeof(path), "%s/%016" PRIx64 ".%s.glsl", dir, hash, stage);
++    FILE *f = fopen(path, "wb");
++    if (!f)
++        return;
++    fwrite(src, 1, strlen(src), f);
++    fclose(f);
++}
++
++/* Dump the GLSL of a compile request that could not be served from the
++ * precompiled set. The renderpass fails; feed the dumps through uam2
++ * and copy the resulting blobs into DK_SHADER_DIR to complete the set. */
++static void dk_shader_dump(struct ra *ra, uint64_t hash,
++                           const char *vert, const char *frag, const char *comp) {
++    mkdir(DK_SHADER_DUMP, 0777);
++    if (vert) dk_shader_write_file(DK_SHADER_DUMP, hash, "vert", vert);
++    if (frag) dk_shader_write_file(DK_SHADER_DUMP, hash, "frag", frag);
++    if (comp) dk_shader_write_file(DK_SHADER_DUMP, hash, "comp", comp);
++    MP_ERR(ra, "deko3d: no precompiled shader %016" PRIx64
++               ", dumped GLSL to %s (compile with uam2, copy blobs to %s)\n",
++           hash, DK_SHADER_DUMP, DK_SHADER_DIR);
++}
++
++/* Load a precompiled dk_shadercache blob for this hash, if present.
++ * Shipped (romfs) blobs are tried first; the SD directory is the
++ * developer's override/extension path. */
++static bool dk_shader_load_blob(void *ta_parent, uint64_t hash, bstr *out) {
++    static const char *dirs[] = { DK_SHADER_ROMFS, DK_SHADER_DIR };
++    for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
++        char path[256];
++        snprintf(path, sizeof(path), "%s/%016" PRIx64 ".bin", dirs[i], hash);
++        FILE *f = fopen(path, "rb");
++        if (!f)
++            continue;
++        bool ok = false;
++        fseek(f, 0, SEEK_END);
++        long size = ftell(f);
++        rewind(f);
++        if (size > (long)sizeof(struct dk_shadercache_hdr)) {
++            char *buf = ta_zalloc_size(ta_parent, size);
++            if (buf && fread(buf, 1, size, f) == (size_t)size) {
++                *out = (bstr){buf, size};
++                ok = true;
++            } else {
++                talloc_free(buf);
++            }
++        }
++        fclose(f);
++        if (ok)
++            return true;
++    }
++    return false;
++}
++#endif
++
+ static void dk_destroy(struct ra *ra);
+ static void dk_tex_destroy(struct ra *ra, struct ra_tex *tex);
+ static struct ra_tex *dk_tex_create(struct ra *ra, const struct ra_tex_params *params);
+@@ -879,6 +969,17 @@
+ 
+     if (!params->cached_program.len ||
+             !load_shader_code(ra, pass, params->cached_program, &pass_priv->shaders[0], &pass_priv->shaders[1], NULL)) {
++#ifdef __SWITCH2__
++        /* No on-device compiler: serve precompiled DKSH by source hash,
++         * or dump the request for offline compilation. */
++        uint64_t hash = dk_shader_hash(params->vertex_shader, params->frag_shader);
++        bstr blob = {0};
++        if (!dk_shader_load_blob(pass, hash, &blob) ||
++                !load_shader_code(ra, pass, blob, &pass_priv->shaders[0], &pass_priv->shaders[1], NULL)) {
++            dk_shader_dump(ra, hash, params->vertex_shader, params->frag_shader, NULL);
++            goto fail_1;
++        }
++#else
+         bool error = false;
+ 
+         uam_compiler *vsh_compiler = uam_create_compiler(DkStage_Vertex),
+@@ -926,6 +1027,7 @@
+ 
+         if (error)
+             goto fail_1;
++#endif
+     }
+ 
+     pass_priv->vao_attribs = talloc_array(pass, DkVtxAttribState, params->num_vertex_attribs);
+@@ -995,6 +1097,17 @@
+ 
+     if (!params->cached_program.len ||
+             !load_shader_code(ra, pass, params->cached_program, NULL, NULL, &pass_priv->shaders[0])) {
++#ifdef __SWITCH2__
++        /* No on-device compiler: serve precompiled DKSH by source hash,
++         * or dump the request for offline compilation. */
++        uint64_t hash = dk_shader_hash(params->compute_shader, NULL);
++        bstr blob = {0};
++        if (!dk_shader_load_blob(pass, hash, &blob) ||
++                !load_shader_code(ra, pass, blob, NULL, NULL, &pass_priv->shaders[0])) {
++            dk_shader_dump(ra, hash, NULL, NULL, params->compute_shader);
++            goto fail_1;
++        }
++#else
+         bool error = false;
+ 
+         uam_compiler *sh_compiler = uam_create_compiler(DkStage_Compute);
+@@ -1030,6 +1143,7 @@
+ 
+         if (error)
+             goto fail_1;
++#endif
+     }
+ 
+     return pass;
+--- mpv-pristine/video/out/gpu/hwdec.c	2026-11-19 16:18:12.435866800 -0500
++++ mpv-0.36.0-sw/video/out/gpu/hwdec.c	2026-11-19 16:22:17.339282700 -0500
+@@ -39,7 +39,9 @@
+ extern const struct ra_hwdec_driver ra_hwdec_drmprime_overlay;
+ extern const struct ra_hwdec_driver ra_hwdec_aimagereader;
+ extern const struct ra_hwdec_driver ra_hwdec_vulkan;
++#ifndef __SWITCH2__
+ extern const struct ra_hwdec_driver ra_hwdec_nvtegra;
++#endif
+ 
+ const struct ra_hwdec_driver *const ra_hwdec_drivers[] = {
+ #if HAVE_VAAPI_EGL || HAVE_VAAPI_LIBPLACEBO
+@@ -84,7 +86,7 @@
+ #if HAVE_VULKAN_INTEROP
+     &ra_hwdec_vulkan,
+ #endif
+-#if HAVE_DEKO3D
++#if HAVE_DEKO3D && !defined(__SWITCH2__)
+     &ra_hwdec_nvtegra,
+ #endif
+ 
+--- mpv-pristine/meson.build	2026-11-19 16:18:12.358767700 -0500
++++ mpv-0.36.0-sw/meson.build	2026-11-19 16:15:16.900582300 -0500
+@@ -916,17 +916,35 @@
+     get_option('gpl') and hos,
+     error_message: 'the build is not GPL or this is not a horizon os!',
+ )
+-libuam = dependency('uam', required: deko3d_opt)
+-deko3d_dep = cc.find_library('deko3d', required: deko3d_opt)
+-deko3d = cc.has_header('deko3d.h', dependencies: deko3d_dep, required: deko3d_opt)
+-features += {'deko3d': deko3d and libuam.found()}
+-if features['deko3d']
+-    dependencies += libuam
+-    sources += files(
+-        'video/out/deko3d/context.c',  
+-        'video/out/deko3d/ra_dk.c',     
+-        'video/out/deko3d/libmpv_dk.c', 
+-        'video/out/hwdec/hwdec_deko3d.c')
++if get_option('deko3d_precompiled')
++    # Switch 2 (drako3d): no on-device shader compiler (libuam is
++    # Maxwell-only), so ra_dk serves precompiled DKSH blobs and dumps
++    # misses for offline compilation. The Switch 1 NVDEC hwdec bridge
++    # is not built (Switch 2 decodes via the FFmpeg viddec decoders).
++    deko3d_dep = cc.find_library('drako3d',
++        dirs: ['/opt/devkitpro/libounce/lib'], required: deko3d_opt)
++    deko3d = cc.has_header('deko3d.h', dependencies: deko3d_dep, required: deko3d_opt)
++    features += {'deko3d': deko3d}
++    if features['deko3d']
++        dependencies += deko3d_dep
++        sources += files(
++            'video/out/deko3d/context.c',
++            'video/out/deko3d/ra_dk.c',
++            'video/out/deko3d/libmpv_dk.c')
++    endif
++else
++    libuam = dependency('uam', required: deko3d_opt)
++    deko3d_dep = cc.find_library('deko3d', required: deko3d_opt)
++    deko3d = cc.has_header('deko3d.h', dependencies: deko3d_dep, required: deko3d_opt)
++    features += {'deko3d': deko3d and libuam.found()}
++    if features['deko3d']
++        dependencies += libuam
++        sources += files(
++            'video/out/deko3d/context.c',  
++            'video/out/deko3d/ra_dk.c',     
++            'video/out/deko3d/libmpv_dk.c', 
++            'video/out/hwdec/hwdec_deko3d.c')
++    endif
+ endif
+ 
+ drm = dependency('libdrm', version: '>= 2.4.75', required: get_option('drm'))
+--- mpv-pristine/meson_options.txt	2026-11-19 16:18:12.360831400 -0500
++++ mpv-0.36.0-sw/meson_options.txt	2026-11-19 16:15:20.590183900 -0500
+@@ -107,6 +107,7 @@
+ option('videotoolbox-gl', type: 'feature', value: 'auto', description: 'Videotoolbox with OpenGL')
+ option('vulkan-interop', type: 'feature', value: 'auto', description: 'Vulkan graphics interop')
+ option('deko3d', type: 'feature', value: 'auto', description: 'deko3d context support')
++option('deko3d_precompiled', type: 'boolean', value: false, description: 'deko3d with precompiled shaders (Switch 2 / drako3d, no uam)')
+ 
+ # macOS features
+ option('macos-10-11-features', type: 'feature', value: 'auto', description: 'macOS 10.11 SDK Features')

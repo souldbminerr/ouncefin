@@ -19,6 +19,7 @@ fi
 aarch64-none-elf-cmake -S . -B build_switch2 \
   -DPLATFORM_SWITCH2=ON \
   -DUSE_DRAKO3D=ON \
+  -DMPV_SW_RENDER=OFF \
   -DCMAKE_BUILD_TYPE=Release -G Ninja "$@"
 cmake --build build_switch2 -j"$(nproc 2>/dev/null || echo 4)"
 echo "done: build_switch2/Switchfin.elf (+ Switchfin.nro if packaging succeeded)"

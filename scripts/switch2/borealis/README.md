@@ -83,3 +83,27 @@ Behavior, all inside `library/.../switch/switch_input.{hpp,cpp}`:
   while a click is held). There is no image cursor path and no ordinary
   (USB) mouse support on Switch 2: the Joy-Con pointer is the only mouse
   source, so nothing is left stuck on screen when the mouse is off.
+
+---
+
+`switch2-dk-zerocopy.patch` adds a zero-copy video upload path to the
+deko3d/drako3d nanovg backend (4 files, ~110 lines, purely additive).
+Generated against upstream borealis `0303fe7f`; same apply procedure
+(`git apply --ignore-whitespace` on a CRLF checkout). What it does:
+
+- `NVG_IMAGE_STREAMING` on the dk backend now gives a texture a
+  persistent upload backing allocated from the dual-mapped (CPU +
+  GPU) data pool, sized to the image and owned by the texture.
+- `DkRenderer::UpdateTexture` recognizes an update whose data pointer
+  is that exact backing and then issues only a GPU-side
+  `copyBufferToImage` from the backing's GPU address — no staging
+  memcpy and no `transferQueue.waitIdle()`. Command memory is pooled
+  in a small ring recycled behind fences (nothing is freed while the
+  GPU may still execute it; the wait before reuse is on a many-frames
+  -old fence, so it is instant). Other callers keep the existing
+  staged path.
+- `DkRenderer::GetImageBacking` / `SwitchVideoContext::getImageBacking`
+  expose the backing's CPU address to the application, which renders
+  into it directly (switchfin's mpv SW render, ping-pong pair — see
+  `app/src/view/mpv_core.cpp`).
+
