@@ -493,9 +493,9 @@ bool AppConfig::init() {
         lunasvg_add_font_face_from_data("", false, false, font.address, font.size, nullptr, nullptr);
     }
 #elif !defined(USE_LIBROMFS)
-    lunasvg_add_font_face_from_file("", false, false, BRLS_ASSET("font/switch_font.ttf"));
+    lunasvg_add_font_face_from_file("", false, false, BRLS_ASSET("font/default.ttf"));
 #else
-    auto& font = romfs::get("font/switch_font.ttf");
+    auto& font = romfs::get("font/default.ttf");
     if (font.valid()) lunasvg_add_font_face_from_data("", false, false, font.data(), font.size(), nullptr, nullptr);
 #endif
     Ums::instance().init();

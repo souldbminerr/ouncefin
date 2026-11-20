@@ -205,7 +205,11 @@ void MPVCore::init() {
     // misc
     mpv_set_option_string(mpv, "config", "yes");
     mpv_set_option_string(mpv, "config-dir", confDir.c_str());
+#if defined(__SWITCH2__) && !defined(MPV_SW_RENDER)
+    mpv_set_option_string(mpv, "sub-fonts-dir", "romfs:/font");
+#else
     mpv_set_option_string(mpv, "sub-fonts-dir", confDir.c_str());
+#endif
     mpv_set_option_string(mpv, "watch-later-dir", fmt::format("{}/watch-later", confDir).c_str());
     // vo_gpu persists compiled shader programs here (dk_shadercache
     // blobs, keyed by generated GLSL) so runtime compilation

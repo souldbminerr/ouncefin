@@ -87,29 +87,6 @@ void mp_ass_set_style(ASS_Style *style, double res_y,
     style->Italic = opts->italic;
 }
 
-void mp_ass_configure_fonts(ASS_Renderer *priv, struct osd_style_opts *opts,
-                            struct mpv_global *global, struct mp_log *log)
-{
-    void *tmp = talloc_new(NULL);
-    char *default_font = mp_find_config_file(tmp, global, "subfont.ttf");
-    char *config       = mp_find_config_file(tmp, global, "fonts.conf");
-
-    if (default_font && !mp_path_exists(default_font))
-        default_font = NULL;
-
-    int font_provider = ASS_FONTPROVIDER_AUTODETECT;
-    if (opts->font_provider == 1)
-        font_provider = ASS_FONTPROVIDER_NONE;
-    if (opts->font_provider == 2)
-        font_provider = ASS_FONTPROVIDER_FONTCONFIG;
-
-    mp_verbose(log, "Setting up fonts...\n");
-    ass_set_fonts(priv, default_font, opts->font, font_provider, config, 1);
-    mp_verbose(log, "Done.\n");
-
-    talloc_free(tmp);
-}
-
 static const int map_ass_level[] = {
     MSGL_ERR,           // 0 "FATAL errors"
     MSGL_WARN,
@@ -132,6 +109,40 @@ static void message_callback(int level, const char *format, va_list va, void *ct
     mp_msg(log, level, "\n");
 }
 
+#if defined(__SWITCH__)
+#include <dirent.h>
+#include <stdio.h>
+
+static char *mp_first_font_in_dir(void *tactx, const char *dir)
+{
+    if (!dir || !dir[0])
+        return NULL;
+
+    DIR *d = opendir(dir);
+    if (!d)
+        return NULL;
+
+    static const char *exts[] = { ".ttf", ".otf", ".ttc", NULL };
+    struct dirent *de;
+    char *result = NULL;
+
+    while ((de = readdir(d))) {
+        size_t len = strlen(de->d_name);
+        for (int i = 0; exts[i]; i++) {
+            size_t el = strlen(exts[i]);
+            if (len >= el && strcasecmp(de->d_name + len - el, exts[i]) == 0) {
+                result = talloc_asprintf(tactx, "%s/%s", dir, de->d_name);
+                break;
+            }
+        }
+        if (result)
+            break;
+    }
+    closedir(d);
+    return result;
+}
+#endif
+
 ASS_Library *mp_ass_init(struct mpv_global *global,
                          struct osd_style_opts *opts, struct mp_log *log)
 {
@@ -148,6 +159,38 @@ ASS_Library *mp_ass_init(struct mpv_global *global,
         ass_set_fonts_dir(priv, path);
     talloc_free(path);
     return priv;
+}
+
+void mp_ass_configure_fonts(ASS_Renderer *priv, struct osd_style_opts *opts,
+                            struct mpv_global *global, struct mp_log *log)
+{
+    void *tmp = talloc_new(NULL);
+    char *default_font = mp_find_config_file(tmp, global, "subfont.ttf");
+    char *config       = mp_find_config_file(tmp, global, "fonts.conf");
+
+    if (default_font && !mp_path_exists(default_font))
+        default_font = NULL;
+
+#if defined(__SWITCH__)
+    if (!default_font) {
+        char *dir = opts->fonts_dir && opts->fonts_dir[0]
+                        ? mp_get_user_path(tmp, global, opts->fonts_dir) : NULL;
+        default_font = mp_first_font_in_dir(tmp, dir);
+        if (default_font)
+            mp_verbose(log, "libass: default font %s\n", default_font);
+    }
+#endif
+
+    int font_provider = ASS_FONTPROVIDER_AUTODETECT;
+    if (opts->font_provider == 1)
+        font_provider = ASS_FONTPROVIDER_NONE;
+    if (opts->font_provider == 2)
+        font_provider = ASS_FONTPROVIDER_FONTCONFIG;
+
+    mp_verbose(log, "Setting up fonts...\n");
+    ass_set_fonts(priv, default_font, opts->font, font_provider, config, 1);
+    mp_verbose(log, "Done.\n");
+    talloc_free(tmp);
 }
 
 void mp_ass_flush_old_events(ASS_Track *track, long long ts)
