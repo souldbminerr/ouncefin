@@ -107,9 +107,9 @@ include(${BOREALIS_LIBRARY}/cmake/toolchain.cmake)
 
 # project info
 project(Switchfin)
-set(VERSION_MAJOR "0")
-set(VERSION_MINOR "9")
-set(VERSION_ALTER "5")
+set(VERSION_MAJOR "1")
+set(VERSION_MINOR "0")
+set(VERSION_ALTER "0")
 set(PROJECT_TITLEID "010ff000ffff0003")
 set(PROJECT_AUTHOR "dragonflylee, Souldbminer")
 set(PACKAGE_NAME "fun.dragonfly.switchfin")
@@ -362,8 +362,8 @@ elseif (PLATFORM_SWITCH)
                 message(FATAL_ERROR "USE_DRAKO3D needs uam2 (devkitPro tools/bin)")
             endif ()
             set(_DKSH_SRC "${BOREALIS_LIBRARY}/lib/extern/nanovg/deko3d/shaders")
-            add_custom_target(${PROJECT_NAME}.nro DEPENDS ${PROJECT_NAME}
-                COMMAND ${NX_NACPTOOL_EXE} --create "${PROJECT_NAME}" "${PROJECT_AUTHOR}" "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_ALTER}" ${PROJECT_NAME}.nacp
+            add_custom_target(ouncefin.nro DEPENDS ${PROJECT_NAME}
+                COMMAND ${NX_NACPTOOL_EXE} --create "Ouncefin" "${PROJECT_AUTHOR}" "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_ALTER}" ${PROJECT_NAME}.nacp
                 COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_RESOURCES} ${CMAKE_BINARY_DIR}/resources
                 # Switch 2 keeps default.ttf in romfs: libass has no
                 # system fonts there, so mpv's sub-fonts-dir points at
@@ -373,7 +373,7 @@ elseif (PLATFORM_SWITCH)
                 COMMAND ${NX_UAM2_EXE} -s vert -o ${CMAKE_BINARY_DIR}/resources/shaders/fill_vsh.dksh ${_DKSH_SRC}/fill_vsh.glsl
                 COMMAND ${NX_UAM2_EXE} -s frag -o ${CMAKE_BINARY_DIR}/resources/shaders/fill_fsh.dksh ${_DKSH_SRC}/fill_fsh.glsl
                 COMMAND ${NX_UAM2_EXE} -s frag -o ${CMAKE_BINARY_DIR}/resources/shaders/fill_aa_fsh.dksh ${_DKSH_SRC}/fill_aa_fsh.glsl
-                COMMAND ${NX_ELF2NRO_EXE} ${PROJECT_NAME}.elf ${PROJECT_NAME}.nro --icon=${PROJECT_ICON} --nacp=${PROJECT_NAME}.nacp --romfsdir=${CMAKE_BINARY_DIR}/resources
+                COMMAND ${NX_ELF2NRO_EXE} ${PROJECT_NAME}.elf ouncefin.nro --icon=${PROJECT_ICON} --nacp=${PROJECT_NAME}.nacp --romfsdir=${CMAKE_BINARY_DIR}/resources
             )
         else ()
             add_custom_target(${PROJECT_NAME}.nro DEPENDS ${PROJECT_NAME}
